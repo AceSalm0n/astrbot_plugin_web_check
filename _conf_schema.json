@@ -1,0 +1,19 @@
+{
+    "check_timeout": {
+        "description": "单个站点检查超时时间（秒）",
+        "hint": "超过此时间未响应则判定为超时",
+        "type": "int",
+        "default": 10
+    },
+    "watchlist": {
+        "description": "批量检查站点列表",
+        "hint": "需要批量检查的 URL 列表，使用 /批量检查 指令触发",
+        "type": "list",
+        "default": [
+            "https://www.baidu.com",
+            "https://www.google.com",
+            "https://www.github.com",
+            "https://www.bing.com"
+        ]
+    }
+}
