@@ -1,8 +1,8 @@
-# astrbot-plugin-webcheck-v1
+# astrbot_plugin_web_check
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-AstrBot 插件 v1 版本，用于检查指定网站在当前网络环境下能否被正常访问，支持单站点检查和批量检查。
+AstrBot 插件，用于检查指定网站在当前网络环境下能否被正常访问，支持单站点检查和批量检查。
 
 ## 功能
 
@@ -25,7 +25,7 @@ AstrBot 插件 v1 版本，用于检查指定网站在当前网络环境下能�
 
 ## 安装
 
-在 AstrBot 插件市场安装使用，或将 `v1/` 目录放入 AstrBot 的 `data/plugins/` 目录下。
+在 AstrBot 插件市场安装使用，或将插件目录放入 AstrBot 的 `data/plugins/` 目录下。
 
 依赖：
 
@@ -63,7 +63,7 @@ Bot: 📊 **批量检查结果**
 ## 项目结构
 
 ```text
-v1/
+astrbot_plugin_web_check/
 ├── main.py            # 插件主逻辑
 ├── __init__.py        # 插件元数据
 ├── _conf_schema.json  # 配置模式

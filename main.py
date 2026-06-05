@@ -153,7 +153,7 @@ async def check_single_url(session: aiohttp.ClientSession, url: str,
     "AceSalm0n",
     "检查网站在当前网络环境下能否被正常访问，支持单站点和批量检查",
     "1.0.0",
-    "",
+    "https://github.com/AceSalm0n/astrbot_plugin_web_check",
 )
 class WebCheckPlugin(Star):
     """网站连通性检查插件"""
