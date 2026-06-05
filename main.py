@@ -11,7 +11,6 @@ AstrBot 网站连通性检查插件
 
 import asyncio
 import ipaddress
-import socket
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -92,19 +91,20 @@ class CheckResult:
 # 工具函数
 # ===========================================================================
 
-def _is_private_url(url: str) -> bool:
+async def _is_private_url(url: str) -> bool:
     """检查 URL 是否指向内网地址，防止 SSRF 攻击"""
     hostname = urlparse(url).hostname
     if not hostname:
         return False
     try:
-        addrs = socket.getaddrinfo(hostname, None)
+        loop = asyncio.get_running_loop()
+        addrs = await loop.getaddrinfo(hostname, None)
         for info in addrs:
             ip_str = info[4][0]
             ip = ipaddress.ip_address(ip_str)
             if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified:
                 return True
-    except socket.gaierror:
+    except OSError:
         return False
     return False
 
@@ -207,7 +207,7 @@ class WebCheckPlugin(Star):
         url = _normalize_url(url)
 
         # SSRF 防护
-        if _is_private_url(url):
+        if await _is_private_url(url):
             yield event.plain_result(
                 "⛔ 出于安全原因，不允许检查内网/私有地址"
             )
@@ -244,7 +244,7 @@ class WebCheckPlugin(Star):
             u = _normalize_url(entry) if isinstance(entry, str) else ""
             if not u:
                 continue
-            if _is_private_url(u):
+            if await _is_private_url(u):
                 blocked += 1
                 continue
             safe_urls.append(u)
@@ -297,7 +297,7 @@ class WebCheckPlugin(Star):
         lines = ["📋 **当前检查列表**\n"]
         for i, entry in enumerate(watchlist, 1):
             u = _normalize_url(entry) if isinstance(entry, str) else str(entry)
-            private = " ⛔" if _is_private_url(u) else ""
+            private = " ⛔" if await _is_private_url(u) else ""
             lines.append(f"{i}. {u}{private}")
         lines.append("\n💡 使用 `/批量检查` 开始检查所有站点")
 
