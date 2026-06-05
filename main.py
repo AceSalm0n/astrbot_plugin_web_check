@@ -80,7 +80,7 @@ class CheckResult:
         return "\n".join(lines)
 
     @staticmethod
-    def _format_size(bytes_: int) -> str:
+    def _format_size(bytes_: float) -> str:
         for unit in ("B", "KB", "MB", "GB"):
             if bytes_ < 1024:
                 return f"{bytes_:.1f}{unit}"
