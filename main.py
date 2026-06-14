@@ -24,6 +24,7 @@ import aiohttp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
+from astrbot.core.star.filter.command import GreedyStr
 
 # ---------------------------------------------------------------------------
 # 配置 Schema（供 AstrBot 管理后台渲染配置表单）
@@ -55,7 +56,7 @@ _conf_schema = {
         "description": "是否跟随重定向（关闭时直接返回 3xx 状态码）",
     },
     "user_agent": {
-        "type": "str",
+        "type": "string",
         "default": "Mozilla/5.0 (compatible; AstrBot-WebCheck/2.0)",
         "description": "发送 HTTP 请求时使用的 User-Agent",
     },
@@ -395,7 +396,7 @@ class WebCheckPlugin(Star):
     # ------------------------------------------------------------------
 
     @filter.command("check")
-    async def cmd_check(self, event: AstrMessageEvent, url: str = ""):
+    async def cmd_check(self, event: AstrMessageEvent, url: GreedyStr):
         """
         检查一个或多个 URL 的连通性。
         用法：/check <url> [url2 url3 ...]
