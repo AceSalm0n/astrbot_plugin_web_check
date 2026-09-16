@@ -3,6 +3,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
 AstrBot 插件，用于检查指定网站在当前网络环境下能否被正常访问，支持单/多站点检查和批量检查。
+当前项目已停止开发，源代码仅供参考！
 
 ## 功能
 
