@@ -305,9 +305,6 @@ async def _check_once(
                 method, current, timeout=aiohttp.ClientTimeout(total=timeout),
                 allow_redirects=False, ssl=verify_ssl, auto_decompress=False,
             ) as resp:
-                if method == "HEAD" and resp.status == 405:
-                    method = "GET"
-                    continue
                 result.status_code = resp.status
                 result.response_time_ms = (time.monotonic() - start) * 1000
                 try:
@@ -315,6 +312,9 @@ async def _check_once(
                     result.declared_length = declared if declared >= 0 else None
                 except (ValueError, TypeError):
                     result.declared_length = None
+                if method == "HEAD" and resp.status == 405:
+                    method = "GET"
+                    continue
                 location = resp.headers.get("Location", "")
                 if resp.status in (301, 302, 303, 307, 308) and location:
                     target = _normalize_url(str(URL(current).join(URL(location))))

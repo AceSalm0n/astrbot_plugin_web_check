@@ -43,6 +43,8 @@ class DeadlineTests(unittest.IsolatedAsyncioTestCase):
         started = time.monotonic()
         result = await w.check_url(session, "https://example.com", timeout=.05, retry=0)
         self.assertTrue(result.error)
+        self.assertEqual(result.status_code, 405)
+        self.assertTrue(result.received_http)
         self.assertLess(time.monotonic() - started, .12)
 
     async def test_body_timeout_closes_response(self):
