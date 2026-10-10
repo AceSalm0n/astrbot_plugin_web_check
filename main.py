@@ -75,6 +75,7 @@ def _command_output(function):
     @wraps(function)
     async def wrapped(self, event, *args, **kwargs):
         try:
+            self._ensure_running()
             self._validated_config()
             async for text in function(self, event, *args, **kwargs):
                 for part in _split_messages(text):
@@ -419,6 +420,9 @@ class WebCheckPlugin(Star):
         self._semaphore = None
         self._concurrency_limit = None
         self._runs = 0
+        self._stopping = False
+        self._tasks = set()
+        self._terminate_lock = asyncio.Lock()
         logger.info("[WebCheck] 插件已加载 v2.0.0")
 
     # ------------------------------------------------------------------
@@ -457,21 +461,35 @@ class WebCheckPlugin(Star):
     # HTTP 会话（懒创建 + 复用）
     # ------------------------------------------------------------------
 
+    def _ensure_running(self):
+        if self._stopping:
+            raise CommandError("插件已停止，无法执行检查；请重新加载插件。")
+
     async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            async with self._session_lock:
-                if self._session is None or self._session.closed:
-                    self._session = aiohttp.ClientSession(
-                        headers={"User-Agent": self._cfg("user_agent")},
-                        connector=SafeTCPConnector()
-                    )
-        return self._session
+        async with self._session_lock:
+            self._ensure_running()
+            if self._session is None or self._session.closed:
+                self._session = aiohttp.ClientSession(
+                    headers={"User-Agent": self._cfg("user_agent")},
+                    connector=SafeTCPConnector(), cookie_jar=aiohttp.DummyCookieJar(),
+                )
+            return self._session
 
     async def terminate(self):
-        """插件卸载时释放 HTTP 会话"""
-        if self._session and not self._session.closed:
-            await self._session.close()
-        logger.info("[WebCheck] 插件已卸载")
+        """停止新检查，取消并等待本插件的检查任务，然后关闭会话。"""
+        async with self._terminate_lock:
+            async with self._session_lock:
+                self._stopping = True
+            tasks = list(self._tasks)
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            async with self._session_lock:
+                if self._session is not None:
+                    await self._session.close()
+                    self._session = None
+            logger.info("[WebCheck] 插件已卸载")
 
     # ------------------------------------------------------------------
     # 内部工具
@@ -500,6 +518,7 @@ class WebCheckPlugin(Star):
         return self._semaphore
 
     async def _collect_results(self, raw_list: List) -> List[CheckResult]:
+        self._ensure_running()
         self._limit_targets(raw_list)
         sem = self._make_semaphore()
 
@@ -509,12 +528,26 @@ class WebCheckPlugin(Star):
             except ValueError as exc:
                 return CheckResult("", "无效地址", error=str(exc), error_kind="invalid")
             async with sem:
+                self._ensure_running()
                 return await self._do_check(url)
 
+        async def run():
+            children = [asyncio.create_task(bounded(raw)) for raw in raw_list]
+            try:
+                return list(await asyncio.gather(*children))
+            finally:
+                for child in children:
+                    if not child.done():
+                        child.cancel()
+                await asyncio.gather(*children, return_exceptions=True)
+
         self._runs += 1
+        task = asyncio.create_task(run(), name="webcheck-batch")
+        self._tasks.add(task)
         try:
-            return list(await asyncio.gather(*(bounded(raw) for raw in raw_list)))
+            return await task
         finally:
+            self._tasks.discard(task)
             self._runs -= 1
 
     def _format_results(self, results: List[CheckResult]) -> str:
