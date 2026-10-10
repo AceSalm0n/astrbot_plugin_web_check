@@ -1,5 +1,5 @@
 """
-AstrBot 网站连通性检查插件 v2.0
+AstrBot 网站连通性检查插件 v2.0.1
 检查指定网站在当前网络环境下能否被正常访问
 
 命令：
@@ -287,7 +287,7 @@ async def _check_once(
     timeout: float,
     use_head: bool,
     follow_redirects: bool,
-    verify_ssl: bool = True,
+    verify_ssl: bool = _conf_schema["verify_ssl"]["default"],
     *,
     result: Optional[CheckResult] = None,
     started_at: Optional[float] = None,
@@ -366,10 +366,10 @@ async def check_url(
     url: str,
     *,
     timeout: int = _DEFAULT_TIMEOUT,
-    use_head: bool = True,
-    follow_redirects: bool = False,
+    use_head: bool = _conf_schema["use_head"]["default"],
+    follow_redirects: bool = _conf_schema["follow_redirects"]["default"],
     retry: int = _DEFAULT_RETRY,
-    verify_ssl: bool = True,
+    verify_ssl: bool = _conf_schema["verify_ssl"]["default"],
 ) -> CheckResult:
     """一个总期限覆盖解析、请求、回退、重定向、正文及重试等待。"""
     started = time.monotonic()
@@ -410,7 +410,7 @@ async def check_url(
     "astrbot_plugin_web_check",
     "AceSalm0n",
     "检查网站在当前网络环境下能否被正常访问，支持单站点、多站点和批量检查",
-    "2.0.0",
+    "2.0.1",
     "https://github.com/AceSalm0n/astrbot_plugin_web_check",
 )
 class WebCheckPlugin(Star):
@@ -427,7 +427,7 @@ class WebCheckPlugin(Star):
         self._stopping = False
         self._tasks = set()
         self._terminate_lock = asyncio.Lock()
-        logger.info("[WebCheck] 插件已加载 v2.0.0")
+        logger.info("[WebCheck] 插件已加载 v2.0.1")
 
     # ------------------------------------------------------------------
     # 配置读取
@@ -633,7 +633,7 @@ class WebCheckPlugin(Star):
         session_ok = self._session is not None and not self._session.closed
         lines = [
             "🌐 **WebCheck 插件状态**\n",
-            f"版本：2.0.0",
+            f"版本：2.0.1",
             f"超时：{self._cfg('check_timeout')}s",
             f"最大并发：{self._cfg('max_concurrent')}（插件共享）",
             f"每次目标上限：{self._cfg('max_sites')}",
