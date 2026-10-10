@@ -207,6 +207,7 @@ class CheckResult:
     tls_verified: bool = True
     declared_length: Optional[int] = None
     content_truncated: bool = False
+    retriable: bool = False
 
     @property
     def is_accessible(self) -> bool:
@@ -331,12 +332,14 @@ async def _check_once(
         result.error_kind = "blocked"
         result.error = "安全拦截：目标地址不属于允许的公网范围"
     except asyncio.TimeoutError:
+        result.retriable = True
         result.error_kind = "network"
         result.error = f"连接超时（总期限 {timeout:g}s）"
     except aiohttp.ClientSSLError:
         result.error_kind = "tls"
         result.error = "HTTPS 证书或 TLS 验证失败"
-    except aiohttp.ClientConnectorError as exc:
+    except aiohttp.ClientConnectionError as exc:
+        result.retriable = not isinstance(exc, aiohttp.ClientConnectorDNSError)
         result.error_kind = "network"
         result.error = f"连接失败：{_short_err(exc)}"
     except aiohttp.ClientError as exc:
@@ -358,19 +361,36 @@ async def check_url(
     retry: int = _DEFAULT_RETRY,
     verify_ssl: bool = True,
 ) -> CheckResult:
-    """
-    带重试和指数退避的 URL 检查入口。
-    每次失败后等待 0.5s × (attempt+1) 再重试。
-    """
-    result: Optional[CheckResult] = None
-    for attempt in range(retry + 1):
-        result = await _check_once(session, url, timeout, use_head, follow_redirects, verify_ssl)
-        if not result.error or attempt >= retry:
-            result.retries = attempt
-            break
-        await asyncio.sleep(0.5 * (attempt + 1))
+    """一个总期限覆盖解析、请求、回退、重定向、正文及重试等待。"""
+    started = time.monotonic()
+    last = CheckResult(url, "无效地址", tls_verified=verify_ssl)
 
-    return result  # type: ignore[return-value]
+    async def run() -> CheckResult:
+        nonlocal last
+        for attempt in range(retry + 1):
+            before_attempt = time.monotonic() - started
+            remaining = max(0.001, timeout - before_attempt)
+            last = await _check_once(session, url, remaining, use_head, follow_redirects, verify_ssl)
+            last.retries = attempt
+            if last.status_code:
+                last.response_time_ms += before_attempt * 1000
+            if not last.error or not last.retriable or attempt == retry:
+                return last
+            await asyncio.sleep(0.5 * (2 ** attempt))
+        return last
+
+    try:
+        return await asyncio.wait_for(run(), timeout=timeout)
+    except asyncio.TimeoutError:
+        last.error_kind = "network"
+        last.error = f"检查超时（总期限 {timeout:g}s）"
+        last.retriable = False
+        if last.hostname == "无效地址":
+            try:
+                last.hostname = URL(_normalize_url(url)).host or ""
+            except ValueError:
+                pass
+        return last
 
 
 # ---------------------------------------------------------------------------
