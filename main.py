@@ -288,9 +288,13 @@ async def _check_once(
     use_head: bool,
     follow_redirects: bool,
     verify_ssl: bool = True,
+    *,
+    result: Optional[CheckResult] = None,
+    started_at: Optional[float] = None,
 ) -> CheckResult:
-    result = CheckResult(url=url, hostname="无效地址", tls_verified=verify_ssl)
-    start = time.monotonic()
+    if result is None:
+        result = CheckResult(url=url, hostname="无效地址", tls_verified=verify_ssl)
+    start = time.monotonic() if started_at is None else started_at
     try:
         current = _normalize_url(url)
         result.hostname = URL(current).host or ""
@@ -376,10 +380,9 @@ async def check_url(
         for attempt in range(retry + 1):
             before_attempt = time.monotonic() - started
             remaining = max(0.001, timeout - before_attempt)
-            last = await _check_once(session, url, remaining, use_head, follow_redirects, verify_ssl)
-            last.retries = attempt
-            if last.status_code:
-                last.response_time_ms += before_attempt * 1000
+            last = CheckResult(url, "无效地址", tls_verified=verify_ssl, retries=attempt)
+            await _check_once(session, url, remaining, use_head, follow_redirects, verify_ssl,
+                              result=last, started_at=started)
             if not last.error or not last.retriable or attempt == retry:
                 return last
             await asyncio.sleep(0.5 * (2 ** attempt))

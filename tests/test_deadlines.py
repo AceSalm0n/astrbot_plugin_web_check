@@ -6,6 +6,20 @@ import aiohttp
 from tests.support import Response, Session, webcheck as w
 
 
+class PartialBody:
+    def __init__(self):
+        self.first = True
+
+    async def read(self, size):
+        if self.first:
+            self.first = False
+            return b"abc"
+        await asyncio.Event().wait()
+
+    def at_eof(self):
+        return False
+
+
 class SlowHeaders(Response):
     def __init__(self, delay, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -37,6 +51,32 @@ class DeadlineTests(unittest.IsolatedAsyncioTestCase):
                                    retry=0, use_head=False)
         self.assertTrue(result.error)
         self.assertTrue(response.closed)
+        self.assertEqual(result.status_code, 200)
+        self.assertTrue(result.received_http)
+
+    async def test_timeout_preserves_partial_body_and_headers(self):
+        response = Response(headers={"Content-Length": "100"})
+        response.content = PartialBody()
+        result = await w.check_url(Session([response]), "https://example.com", timeout=.04,
+                                   retry=0, use_head=False)
+        self.assertTrue(result.error)
+        self.assertEqual(result.status_code, 200)
+        self.assertTrue(result.received_http)
+        self.assertEqual(result.content_length, 3)
+        self.assertEqual(result.declared_length, 100)
+        self.assertEqual(result.category, "network_error")
+        self.assertTrue(response.closed)
+
+    async def test_timeout_during_retry_keeps_attempt_count(self):
+        response = Response()
+        response.content = PartialBody()
+        session = Session([aiohttp.ServerDisconnectedError(), response])
+        with patch.object(w.asyncio, "sleep", AsyncMock()):
+            result = await w.check_url(session, "https://example.com", timeout=.04,
+                                       retry=1, use_head=False)
+        self.assertTrue(result.error)
+        self.assertEqual(result.retries, 1)
+        self.assertEqual(result.status_code, 200)
 
     async def test_backoff_cannot_exceed_total_deadline(self):
         session = Session([aiohttp.ServerDisconnectedError()])
