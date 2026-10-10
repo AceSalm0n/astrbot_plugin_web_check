@@ -213,51 +213,54 @@ class CheckResult:
     retriable: bool = False
 
     @property
+    def received_http(self) -> bool:
+        return self.status_code != 0
+
+    @property
     def is_accessible(self) -> bool:
-        return self.status_code != 0 and not self.error
+        """兼容既有 HTTP 连通性语义，不用于成功统计。"""
+        return self.received_http and not self.error
 
     @property
     def is_redirect(self) -> bool:
         return 300 <= self.status_code < 400
 
     @property
-    def status_emoji(self) -> str:
-        if self.error:
-            return "🔴"
+    def category(self) -> str:
+        if self.error_kind in ("blocked", "invalid"):
+            return self.error_kind
+        if self.error or not self.received_http:
+            return "network_error"
         if 200 <= self.status_code < 300:
-            return "🟢"
+            return "success"
         if self.is_redirect:
-            return "🔀"
-        if 400 <= self.status_code < 500:
-            return "🟡"
-        if 500 <= self.status_code < 600:
-            return "🔴"
-        return "⚪"
+            return "redirect"
+        return "http_error"
+
+    @property
+    def status_label(self) -> str:
+        return {"success": "正常响应", "redirect": "重定向", "http_error": "HTTP 错误",
+                "network_error": "网络失败", "blocked": "安全拦截", "invalid": "输入错误"}[self.category]
+
+    @property
+    def status_emoji(self) -> str:
+        return {"success": "✅", "redirect": "↪️", "http_error": "⚠️",
+                "network_error": "🔌", "blocked": "⛔", "invalid": "✏️"}[self.category]
 
     def format_brief(self) -> str:
-        """单行摘要，适合批量结果列表"""
-        if self.error:
-            return f"{self.status_emoji} {self.hostname}  ✗ {self.error}"
-        retry_note = f" (重试{self.retries}次)" if self.retries else ""
-        retry_note += " [HTTPS 证书未验证]" if not self.tls_verified else ""
-        retry_note += " [正文截断]" if self.content_truncated else ""
-        return (
-            f"{self.status_emoji} {self.hostname}  "
-            f"HTTP {self.status_code}  {self.response_time_ms:.0f}ms{retry_note}"
-        )
+        notes = " [HTTPS 证书未验证]" if not self.tls_verified else ""
+        notes += " [正文截断]" if self.content_truncated else ""
+        notes += f" [重试 {self.retries} 次]" if self.retries else ""
+        description = self.error if self.error else f"HTTP {self.status_code}  {self.response_time_ms:.0f}ms"
+        return f"{self.status_emoji} {self.hostname} [{self.status_label}] {description}{notes}"
 
     def format_detail(self) -> str:
-        """多行详情，适合单站点查询"""
+        lines = [f"{self.status_emoji} **{self.hostname}** {self.status_label}"]
+        if self.received_http:
+            lines.extend([f"  状态码：{self.status_code}",
+                          f"  收到响应头耗时：{self.response_time_ms:.0f} ms"])
         if self.error:
-            return (
-                f"{self.status_emoji} **{self.hostname}** 无法访问\n"
-                f"  错误：{self.error}"
-            )
-        lines = [
-            f"{self.status_emoji} **{self.hostname}** 可访问",
-            f"  状态码：{self.status_code}",
-            f"  响应时间：{self.response_time_ms:.0f} ms",
-        ]
+            lines.append(f"  错误：{self.error}")
         if not self.tls_verified:
             lines.append("  ⚠ HTTPS 证书未验证")
         if self.declared_length is not None:
@@ -270,8 +273,6 @@ class CheckResult:
             lines.append(f"  重定向至：{_display_url(self.redirect_location)}")
         if self.retries:
             lines.append(f"  重试次数：{self.retries}")
-        if not (200 <= self.status_code < 300):
-            lines.append("  ⚠ 非 2xx 响应")
         return "\n".join(lines)
 
 
@@ -519,9 +520,19 @@ class WebCheckPlugin(Star):
     def _format_results(self, results: List[CheckResult]) -> str:
         if len(results) == 1:
             return results[0].format_detail()
-        accessible = sum(r.is_accessible for r in results)
-        lines = [f"📊 {accessible}/{len(results)} 个可访问", ""]
-        lines.extend(r.format_brief() for r in sorted(results, key=lambda r: r.is_accessible))
+        counts = {key: 0 for key in ("success", "redirect", "http_error", "network_error", "blocked", "invalid")}
+        for result in results:
+            counts[result.category] += 1
+        received = [r for r in results if r.received_http]
+        lines = ["📊 检查结果", f"总计：{len(results)}", f"HTTP 有响应：{len(received)}",
+                 f"✅ 正常响应：{counts['success']}", f"↪️ 重定向：{counts['redirect']}",
+                 f"⚠️ HTTP 错误：{counts['http_error']}", f"🔌 网络失败：{counts['network_error']}",
+                 f"⛔ 安全拦截：{counts['blocked']}", f"✏️ 输入错误：{counts['invalid']}"]
+        if received:
+            average = sum(r.response_time_ms for r in received) / len(received)
+            lines.append(f"收到响应头平均耗时：{average:.0f} ms")
+        lines.append("")
+        lines.extend(r.format_brief() for r in sorted(results, key=lambda r: r.category == "success"))
         return "\n".join(lines)
 
     @filter.command("check")
