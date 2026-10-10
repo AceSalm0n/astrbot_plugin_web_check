@@ -1,7 +1,7 @@
 {
     "check_timeout": {
-        "description": "单个站点检查超时时间（秒）",
-        "hint": "超过此时间未响应则判定为超时",
+        "description": "取得并发名额后的单站点总期限（秒，1–120）",
+        "hint": "覆盖 DNS、请求、回退、跳转、正文与重试等待；不含并发排队",
         "type": "int",
         "default": 10
     },
@@ -20,5 +20,35 @@
         "type": "bool",
         "default": true,
         "description": "验证 HTTPS 证书，关闭时结果标注未验证"
+    },
+    "max_concurrent": {
+        "type": "int",
+        "default": 5,
+        "description": "插件共享的最大检查并发数（1–20）"
+    },
+    "retry_count": {
+        "type": "int",
+        "default": 1,
+        "description": "暂时性连接错误重试次数（0–3）"
+    },
+    "use_head": {
+        "type": "bool",
+        "default": true,
+        "description": "优先 HEAD；405 时回退 GET"
+    },
+    "follow_redirects": {
+        "type": "bool",
+        "default": false,
+        "description": "手动跟随重定向，最多 5 跳"
+    },
+    "user_agent": {
+        "type": "string",
+        "default": "Mozilla/5.0 (compatible; AstrBot-WebCheck/2.0)",
+        "description": "HTTP User-Agent，不允许换行"
+    },
+    "max_sites": {
+        "type": "int",
+        "default": 50,
+        "description": "单次命令目标上限（1–100）；超限整体拒绝"
     }
 }

@@ -14,6 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
+from collections.abc import Mapping
+from copy import deepcopy
+from functools import wraps
+from pathlib import Path
 import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -31,55 +36,53 @@ from astrbot.core.star.filter.command import GreedyStr
 # ---------------------------------------------------------------------------
 # 配置 Schema（供 AstrBot 管理后台渲染配置表单）
 # ---------------------------------------------------------------------------
-_conf_schema = {
-    "check_timeout": {
-        "type": "int",
-        "default": 10,
-        "description": "HTTP 请求超时时间（秒）",
-    },
-    "max_concurrent": {
-        "type": "int",
-        "default": 5,
-        "description": "批量检查时的最大并发请求数",
-    },
-    "retry_count": {
-        "type": "int",
-        "default": 1,
-        "description": "请求失败后的重试次数（0 = 不重试）",
-    },
-    "use_head": {
-        "type": "bool",
-        "default": True,
-        "description": "优先使用 HEAD 请求（不下载响应体，速度更快）",
-    },
-    "verify_ssl": {"type": "bool", "default": True, "description": "验证 HTTPS 证书"},
-    "follow_redirects": {
-        "type": "bool",
-        "default": False,
-        "description": "是否跟随重定向（关闭时直接返回 3xx 状态码）",
-    },
-    "user_agent": {
-        "type": "string",
-        "default": "Mozilla/5.0 (compatible; AstrBot-WebCheck/2.0)",
-        "description": "发送 HTTP 请求时使用的 User-Agent",
-    },
-    "watchlist": {
-        "type": "list",
-        "default": [],
-        "description": "批量检查的站点列表，每项一个 URL",
-    },
-}
+_conf_schema = json.loads(Path(__file__).with_name("_conf_schema.json").read_text(encoding="utf-8"))
 
 # ---------------------------------------------------------------------------
 # 默认值常量
 # ---------------------------------------------------------------------------
-_DEFAULT_TIMEOUT: int = 10
-_DEFAULT_RETRY: int = 1
+_DEFAULT_TIMEOUT: int = _conf_schema["check_timeout"]["default"]
+_DEFAULT_RETRY: int = _conf_schema["retry_count"]["default"]
 
 
 # ---------------------------------------------------------------------------
 # 工具函数
 # ---------------------------------------------------------------------------
+
+class ConfigError(ValueError):
+    """用户可修正的配置错误。"""
+
+
+class CommandError(ValueError):
+    """命令目标数量等输入边界错误。"""
+
+
+def _split_messages(text: str):
+    pending = ""
+    for line in text.splitlines(keepends=True):
+        while line:
+            space = 1800 - len(pending)
+            pending += line[:space]
+            line = line[space:]
+            if len(pending) == 1800:
+                yield pending
+                pending = ""
+    if pending:
+        yield pending
+
+
+def _command_output(function):
+    @wraps(function)
+    async def wrapped(self, event, *args, **kwargs):
+        try:
+            self._validated_config()
+            async for text in function(self, event, *args, **kwargs):
+                for part in _split_messages(text):
+                    yield event.plain_result(part)
+        except (ConfigError, CommandError) as exc:
+            yield event.plain_result(str(exc))
+    return wrapped
+
 
 def _short_err(exc: Exception, max_len: int = 160) -> str:
     """底层异常可能带凭据，用户只看到异常类别。"""
@@ -409,18 +412,45 @@ class WebCheckPlugin(Star):
 
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
-        self.config: AstrBotConfig = config or {}
+        self.config: AstrBotConfig = config if config is not None else {}
         self._session: Optional[aiohttp.ClientSession] = None
         self._session_lock = asyncio.Lock()
+        self._semaphore = None
+        self._concurrency_limit = None
+        self._runs = 0
         logger.info("[WebCheck] 插件已加载 v2.0.0")
 
     # ------------------------------------------------------------------
     # 配置读取
     # ------------------------------------------------------------------
 
+    def _validated_config(self) -> dict:
+        if not isinstance(self.config, Mapping):
+            raise ConfigError("配置错误：插件配置必须是对象")
+        values = {key: self.config.get(key, deepcopy(spec["default"])) for key, spec in _conf_schema.items()}
+        bounds = {"check_timeout": (1, 120), "max_concurrent": (1, 20),
+                  "retry_count": (0, 3), "max_sites": (1, 100)}
+        for key, (low, high) in bounds.items():
+            value = values[key]
+            if type(value) is not int or not low <= value <= high:
+                raise ConfigError(f"配置错误：{key} 必须为 {low}–{high} 的整数")
+        for key in ("use_head", "follow_redirects", "verify_ssl"):
+            if type(values[key]) is not bool:
+                raise ConfigError(f"配置错误：{key} 必须为布尔值")
+        if not isinstance(values["watchlist"], list):
+            raise ConfigError("配置错误：watchlist 必须为列表")
+        agent = values["user_agent"]
+        if not isinstance(agent, str) or not agent.strip() or len(agent) > 256 or any(ord(ch) < 32 or ord(ch) == 127 for ch in agent):
+            raise ConfigError("配置错误：user_agent 必须是 1–256 字符且无控制字符的文本")
+        return values
+
     def _cfg(self, key: str):
-        """读取配置项，不存在时回退到 schema 默认值"""
-        return self.config.get(key, _conf_schema[key]["default"])
+        return self._validated_config()[key]
+
+    def _limit_targets(self, targets):
+        maximum = self._cfg("max_sites")
+        if len(targets) > maximum:
+            raise CommandError(f"检查被拒绝：{len(targets)} 个目标超过上限 {maximum}，请拆分检查或调整 max_sites。")
 
     # ------------------------------------------------------------------
     # HTTP 会话（懒创建 + 复用）
@@ -460,9 +490,16 @@ class WebCheckPlugin(Star):
         )
 
     def _make_semaphore(self) -> asyncio.Semaphore:
-        return asyncio.Semaphore(self._cfg("max_concurrent"))
+        limit = self._cfg("max_concurrent")
+        if self._concurrency_limit != limit:
+            if self._runs:
+                raise ConfigError("配置错误：max_concurrent 已变更，请等待在途检查结束后重试。")
+            self._semaphore = asyncio.Semaphore(limit)
+            self._concurrency_limit = limit
+        return self._semaphore
 
     async def _collect_results(self, raw_list: List) -> List[CheckResult]:
+        self._limit_targets(raw_list)
         sem = self._make_semaphore()
 
         async def bounded(raw) -> CheckResult:
@@ -473,7 +510,11 @@ class WebCheckPlugin(Star):
             async with sem:
                 return await self._do_check(url)
 
-        return list(await asyncio.gather(*(bounded(raw) for raw in raw_list)))
+        self._runs += 1
+        try:
+            return list(await asyncio.gather(*(bounded(raw) for raw in raw_list)))
+        finally:
+            self._runs -= 1
 
     def _format_results(self, results: List[CheckResult]) -> str:
         if len(results) == 1:
@@ -484,34 +525,39 @@ class WebCheckPlugin(Star):
         return "\n".join(lines)
 
     @filter.command("check")
+    @_command_output
     async def cmd_check(self, event: AstrMessageEvent, url: GreedyStr = ""):
         """检查一个或多个 URL。"""
         raw_parts = url.split()
         if not raw_parts:
-            yield event.plain_result("📌 用法：/check <url> [url2 ...]\n示例：/check baidu.com github.com")
+            yield ("📌 用法：/check <url> [url2 ...]\n示例：/check baidu.com github.com")
             return
+        self._limit_targets(raw_parts)
         label = _display_url(raw_parts[0]) if len(raw_parts) == 1 else f"{len(raw_parts)} 个站点"
-        yield event.plain_result(f"🔍 正在检查 {label} ...")
+        yield (f"🔍 正在检查 {label} ...")
         results = await self._collect_results(raw_parts)
-        yield event.plain_result(self._format_results(results))
+        yield (self._format_results(results))
 
     @filter.command("批量检查")
+    @_command_output
     async def cmd_batch_check(self, event: AstrMessageEvent):
         """批量检查配置的 watchlist。"""
         watchlist = self._cfg("watchlist")
         if not watchlist:
-            yield event.plain_result("⚠ 未配置站点列表，请在插件配置中设置 watchlist。")
+            yield ("⚠ 未配置站点列表，请在插件配置中设置 watchlist。")
             return
-        yield event.plain_result(f"🔍 正在检查 {len(watchlist)} 个站点...")
+        self._limit_targets(watchlist)
+        yield (f"🔍 正在检查 {len(watchlist)} 个站点...")
         results = await self._collect_results(watchlist)
-        yield event.plain_result(self._format_results(results))
+        yield (self._format_results(results))
 
     @filter.command("check列表")
+    @_command_output
     async def cmd_list_watchlist(self, event: AstrMessageEvent):
         """查看 watchlist 中配置的所有站点"""
         watchlist = self._cfg("watchlist")
         if not watchlist:
-            yield event.plain_result(
+            yield (
                 "📋 当前 watchlist 为空。\n"
                 "请在插件配置中设置 watchlist 字段，每项填写一个 URL。"
             )
@@ -526,13 +572,14 @@ class WebCheckPlugin(Star):
                 lines.append(f"{i}. 输入错误：无效地址")
 
         lines.append("\n💡 使用 /批量检查 开始检查所有站点")
-        yield event.plain_result("\n".join(lines))
+        yield ("\n".join(lines))
 
     # ------------------------------------------------------------------
     # /check状态
     # ------------------------------------------------------------------
 
     @filter.command("check状态")
+    @_command_output
     async def cmd_status(self, event: AstrMessageEvent):
         """查看插件当前配置和运行状态"""
         session_ok = self._session is not None and not self._session.closed
@@ -540,23 +587,25 @@ class WebCheckPlugin(Star):
             "🌐 **WebCheck 插件状态**\n",
             f"版本：2.0.0",
             f"超时：{self._cfg('check_timeout')}s",
-            f"最大并发：{self._cfg('max_concurrent')}",
+            f"最大并发：{self._cfg('max_concurrent')}（插件共享）",
+            f"每次目标上限：{self._cfg('max_sites')}",
             f"失败重试：{self._cfg('retry_count')} 次",
             f"HEAD 优先：{'是' if self._cfg('use_head') else '否'}",
             f"跟随重定向：{'是' if self._cfg('follow_redirects') else '否'}",
             f"Watchlist：{len(self._cfg('watchlist'))} 个站点",
             f"HTTP 会话：{'✅ 活跃' if session_ok else '⏹ 未创建'}",
         ]
-        yield event.plain_result("\n".join(lines))
+        yield ("\n".join(lines))
 
     # ------------------------------------------------------------------
     # /check帮助
     # ------------------------------------------------------------------
 
     @filter.command("check帮助")
+    @_command_output
     async def cmd_help(self, event: AstrMessageEvent):
         """显示所有可用命令及说明"""
-        yield event.plain_result(
+        yield (
             "🌐 **WebCheck 帮助**\n\n"
             "/check <url> [url2 ...]   检查一个或多个网址\n"
             "/批量检查                  检查 watchlist 中的所有站点\n"
