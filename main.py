@@ -135,21 +135,25 @@ def _normalize_url(raw: str) -> str:
 
 
 def _is_reserved_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """
-    判断 IP 是否属于保留/私有范围。
-    覆盖：私有段、回环、链路本地、多播、未指定、保留段（IPv4）。
-    """
-    if ip.is_private or ip.is_loopback or ip.is_link_local:
-        return True
-    if ip.is_multicast or ip.is_unspecified:
-        return True
-    # IPv4 额外保留段（169.254/10 已含在 is_private，此处兜底）
-    if isinstance(ip, ipaddress.IPv4Address):
-        try:
-            return ip.is_reserved
-        except AttributeError:
-            pass
-    return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return _is_reserved_ip(ip.ipv4_mapped)
+    return not ip.is_global or ip.is_multicast or ip.is_reserved
+
+
+class UnsafeTargetError(aiohttp.ClientError):
+    """实际连接地址违反公网访问策略。"""
+
+
+class SafeTCPConnector(aiohttp.TCPConnector):
+    async def _resolve_host(self, host, port, traces=None):
+        # 在缓存、IP 字面量和 DNS 解析的共同出口检查，原 hostname 不变。
+        addresses = await super()._resolve_host(host, port, traces)
+        if not addresses:
+            raise OSError("DNS 未返回地址")
+        for entry in addresses:
+            if _is_reserved_ip(ipaddress.ip_address(entry["host"])):
+                raise UnsafeTargetError("安全拦截：目标地址不属于允许的公网范围")
+        return addresses
 
 
 async def _is_private_url(url: str) -> bool:
@@ -301,7 +305,11 @@ async def _check_once(
                 if result.is_redirect:
                     result.redirect_location = resp.headers.get("Location", "")
 
+    except UnsafeTargetError:
+        result.error_kind = "blocked"
+        result.error = "安全拦截：目标地址不属于允许的公网范围"
     except asyncio.TimeoutError:
+        result.error_kind = "network"
         result.error = f"超时（>{timeout}s）"
     except aiohttp.ClientSSLError as exc:
         result.error = f"SSL 错误：{_short_err(exc)}"
@@ -377,7 +385,8 @@ class WebCheckPlugin(Star):
             async with self._session_lock:
                 if self._session is None or self._session.closed:
                     self._session = aiohttp.ClientSession(
-                        headers={"User-Agent": self._cfg("user_agent")}
+                        headers={"User-Agent": self._cfg("user_agent")},
+                        connector=SafeTCPConnector()
                     )
         return self._session
 
@@ -415,8 +424,6 @@ class WebCheckPlugin(Star):
             except ValueError as exc:
                 return CheckResult("", "无效地址", error=str(exc), error_kind="invalid")
             async with sem:
-                if await _is_private_url(url):
-                    return CheckResult(url, urlparse(url).hostname or "", error="安全拦截：内网/私有地址", error_kind="blocked")
                 return await self._do_check(url)
 
         return list(await asyncio.gather(*(bounded(raw) for raw in raw_list)))
