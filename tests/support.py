@@ -64,6 +64,16 @@ class Body:
             self.consumed += len(chunk)
             yield chunk
 
+    async def read(self, size):
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        chunk = self.data[self.consumed:self.consumed + size]
+        self.consumed += len(chunk)
+        return chunk
+
+    def at_eof(self):
+        return self.consumed == len(self.data)
+
 
 class Response:
     def __init__(self, status=200, headers=None, body=b"ok", delay=0):

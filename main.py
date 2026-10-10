@@ -324,11 +324,12 @@ async def _check_once(
                         current = target
                         continue
                 if method == "GET":
-                    async for chunk in resp.content.iter_chunked(8192):
-                        result.content_length += len(chunk)
-                        if result.content_length >= 65536:
-                            result.content_truncated = True
+                    while result.content_length < 65536:
+                        chunk = await resp.content.read(min(8192, 65536 - result.content_length))
+                        if not chunk:
                             break
+                        result.content_length += len(chunk)
+                    result.content_truncated = result.content_length == 65536 and not resp.content.at_eof()
                 break
     except ValueError:
         result.error_kind = "invalid"
