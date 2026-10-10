@@ -92,7 +92,7 @@ def _short_err(exc: Exception, max_len: int = 160) -> str:
 
 def _display_url(url: str) -> str:
     try:
-        parsed = urlsplit(url)
+        parsed = urlsplit(_normalize_url(url))
         host = parsed.hostname or ""
         if ":" in host:
             host = f"[{host}]"

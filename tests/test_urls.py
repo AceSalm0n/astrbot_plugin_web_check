@@ -17,6 +17,12 @@ class UrlTests(unittest.TestCase):
 
 
 class CommandUrlTests(unittest.IsolatedAsyncioTestCase):
+    async def test_schemeless_credentials_are_never_echoed(self):
+        plugin = w.WebCheckPlugin(None, {})
+        output = "\n".join(await messages(plugin.cmd_check(Event(), "user:secret123@example.com")))
+        self.assertNotIn("secret123", output)
+        self.assertIn("输入", output)
+
     async def test_bad_url_does_not_abort_other_targets(self):
         plugin = w.WebCheckPlugin(None, {})
         plugin._do_check = AsyncMock(return_value=w.CheckResult(
