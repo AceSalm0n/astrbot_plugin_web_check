@@ -17,7 +17,9 @@ import ipaddress
 import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit, parse_qsl, urlencode
+
+from yarl import URL
 
 import aiohttp
 
@@ -78,10 +80,23 @@ _DEFAULT_RETRY: int = 1
 # 工具函数
 # ---------------------------------------------------------------------------
 
-def _short_err(exc: Exception, max_len: int = 80) -> str:
-    """将异常信息裁剪为可读的短字符串"""
-    msg = str(exc)
-    return (msg[:max_len] + "…") if len(msg) > max_len else msg
+def _short_err(exc: Exception, max_len: int = 160) -> str:
+    """底层异常可能带凭据，用户只看到异常类别。"""
+    return type(exc).__name__[:max_len]
+
+
+def _display_url(url: str) -> str:
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname or ""
+        if ":" in host:
+            host = f"[{host}]"
+        if parsed.port:
+            host += f":{parsed.port}"
+        query = urlencode([(key, "隐藏") for key, _ in parse_qsl(parsed.query, keep_blank_values=True)])
+        return urlunsplit((parsed.scheme, host, parsed.path, query, ""))[:200]
+    except (ValueError, TypeError):
+        return "无效地址"
 
 
 def _fmt_size(b: float) -> str:
@@ -95,11 +110,28 @@ def _fmt_size(b: float) -> str:
 
 
 def _normalize_url(raw: str) -> str:
-    """补全协议头并去除多余空白；默认使用 https://"""
+    """校验 HTTP URL；仅缺失协议时补 HTTPS。"""
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("输入错误：网址不能为空")
     raw = raw.strip()
-    if not (raw.startswith("http://") or raw.startswith("https://")):
+    if any(ch.isspace() or ord(ch) < 32 for ch in raw) or "\\" in raw:
+        raise ValueError("输入错误：网址包含无效字符")
+    if "://" not in raw:
         raw = "https://" + raw
-    return raw
+    try:
+        parsed = urlsplit(raw)
+        if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+            raise ValueError("协议或主机无效")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("不接受含凭据的网址")
+        if parsed.port is not None and not 1 <= parsed.port <= 65535:
+            raise ValueError("端口范围无效")
+        normalized = URL(raw).with_scheme(parsed.scheme.lower()).with_fragment(None)
+        if not normalized.host:
+            raise ValueError("缺少主机名")
+        return str(normalized)
+    except (ValueError, TypeError, UnicodeError) as exc:
+        raise ValueError("输入错误：网址格式、协议或凭据不符合要求") from exc
 
 
 def _is_reserved_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -166,6 +198,7 @@ class CheckResult:
     redirect_location: str = ""
     error: str = ""
     retries: int = 0
+    error_kind: str = ""
 
     @property
     def is_accessible(self) -> bool:
@@ -214,7 +247,7 @@ class CheckResult:
         if self.content_length > 0:
             lines.append(f"  内容大小：{_fmt_size(self.content_length)}")
         if self.redirect_location:
-            lines.append(f"  重定向至：{self.redirect_location}")
+            lines.append(f"  重定向至：{_display_url(self.redirect_location)}")
         if self.retries:
             lines.append(f"  重试次数：{self.retries}")
         if not (200 <= self.status_code < 300):
@@ -370,158 +403,54 @@ class WebCheckPlugin(Star):
             retry=self._cfg("retry_count"),
         )
 
-    async def _filter_safe_urls(
-        self, raw_list: List
-    ) -> Tuple[List[str], int]:
-        """
-        过滤 watchlist：规范化 URL 并去除内网地址。
-        返回 (safe_urls, blocked_count)。
-        """
-        safe: List[str] = []
-        blocked = 0
-        for entry in raw_list:
-            if not isinstance(entry, str) or not entry.strip():
-                continue
-            u = _normalize_url(entry)
-            if await _is_private_url(u):
-                blocked += 1
-            else:
-                safe.append(u)
-        return safe, blocked
-
     def _make_semaphore(self) -> asyncio.Semaphore:
         return asyncio.Semaphore(self._cfg("max_concurrent"))
 
-    # ------------------------------------------------------------------
-    # /check
-    # ------------------------------------------------------------------
-
-    @filter.command("check")
-    async def cmd_check(self, event: AstrMessageEvent, url: GreedyStr):
-        """
-        检查一个或多个 URL 的连通性。
-        用法：/check <url> [url2 url3 ...]
-        示例：/check https://baidu.com github.com
-        """
-        raw_parts = url.split() if url.strip() else []
-
-        if not raw_parts:
-            yield event.plain_result(
-                "📌 用法：/check <url> [url2 ...]\n"
-                "示例：/check baidu.com github.com\n"
-                "提示：可省略 https://，插件会自动补全"
-            )
-            return
-
-        urls = [_normalize_url(u) for u in raw_parts]
-
-        # SSRF 过滤
-        safe_urls: List[str] = []
-        blocked_count = 0
-        for u in urls:
-            if await _is_private_url(u):
-                blocked_count += 1
-            else:
-                safe_urls.append(u)
-
-        if not safe_urls:
-            yield event.plain_result("⛔ 所有地址均为内网/私有地址，已拒绝访问")
-            return
-
-        if len(safe_urls) == 1:
-            yield event.plain_result(f"🔍 正在检查 {safe_urls[0]} ...")
-        else:
-            yield event.plain_result(f"🔍 正在检查 {len(safe_urls)} 个站点...")
-
+    async def _collect_results(self, raw_list: List) -> List[CheckResult]:
         sem = self._make_semaphore()
 
-        async def bounded(u: str) -> CheckResult:
+        async def bounded(raw) -> CheckResult:
+            try:
+                url = _normalize_url(raw)
+            except ValueError as exc:
+                return CheckResult("", "无效地址", error=str(exc), error_kind="invalid")
             async with sem:
-                return await self._do_check(u)
+                if await _is_private_url(url):
+                    return CheckResult(url, urlparse(url).hostname or "", error="安全拦截：内网/私有地址", error_kind="blocked")
+                return await self._do_check(url)
 
-        results = await asyncio.gather(*[bounded(u) for u in safe_urls])
+        return list(await asyncio.gather(*(bounded(raw) for raw in raw_list)))
 
-        # 单站点 → 详情；多站点 → 摘要列表
+    def _format_results(self, results: List[CheckResult]) -> str:
         if len(results) == 1:
-            output_lines = [results[0].format_detail()]
-        else:
-            accessible = sum(1 for r in results if r.is_accessible)
-            avg_ms = (
-                sum(r.response_time_ms for r in results if r.is_accessible) / accessible
-                if accessible else 0.0
-            )
-            summary = (
-                f"📊 {accessible}/{len(results)} 个可访问"
-                + (f"  平均响应 {avg_ms:.0f}ms" if accessible else "")
-            )
-            output_lines = [summary, ""]
-            # 失败的置前，便于发现问题
-            for r in sorted(results, key=lambda r: r.is_accessible):
-                output_lines.append(r.format_brief())
+            return results[0].format_detail()
+        accessible = sum(r.is_accessible for r in results)
+        lines = [f"📊 {accessible}/{len(results)} 个可访问", ""]
+        lines.extend(r.format_brief() for r in sorted(results, key=lambda r: r.is_accessible))
+        return "\n".join(lines)
 
-        if blocked_count:
-            output_lines.append(f"\n⛔ 已拦截 {blocked_count} 个内网地址")
-
-        yield event.plain_result("\n".join(output_lines))
-
-    # ------------------------------------------------------------------
-    # /批量检查
-    # ------------------------------------------------------------------
+    @filter.command("check")
+    async def cmd_check(self, event: AstrMessageEvent, url: GreedyStr = ""):
+        """检查一个或多个 URL。"""
+        raw_parts = url.split()
+        if not raw_parts:
+            yield event.plain_result("📌 用法：/check <url> [url2 ...]\n示例：/check baidu.com github.com")
+            return
+        label = _display_url(raw_parts[0]) if len(raw_parts) == 1 else f"{len(raw_parts)} 个站点"
+        yield event.plain_result(f"🔍 正在检查 {label} ...")
+        results = await self._collect_results(raw_parts)
+        yield event.plain_result(self._format_results(results))
 
     @filter.command("批量检查")
     async def cmd_batch_check(self, event: AstrMessageEvent):
-        """批量检查 watchlist 中配置的所有站点"""
+        """批量检查配置的 watchlist。"""
         watchlist = self._cfg("watchlist")
         if not watchlist:
-            yield event.plain_result(
-                "⚠ 未配置站点列表。\n"
-                "请在 AstrBot 管理后台 → 插件配置 → watchlist 中添加站点，\n"
-                "然后使用 /批量检查 执行检查。"
-            )
+            yield event.plain_result("⚠ 未配置站点列表，请在插件配置中设置 watchlist。")
             return
-
-        safe_urls, blocked = await self._filter_safe_urls(watchlist)
-        if not safe_urls:
-            yield event.plain_result("⛔ watchlist 中所有地址均为内网地址，已全部拦截。")
-            return
-
-        note = f"\n⛔ 已跳过 {blocked} 个内网地址" if blocked else ""
-        yield event.plain_result(
-            f"🔍 正在检查 {len(safe_urls)}/{len(watchlist)} 个站点...{note}"
-        )
-
-        sem = self._make_semaphore()
-
-        async def bounded(u: str) -> CheckResult:
-            async with sem:
-                return await self._do_check(u)
-
-        results = list(await asyncio.gather(*[bounded(u) for u in safe_urls]))
-
-        accessible = [r for r in results if r.is_accessible]
-        failed = [r for r in results if not r.is_accessible]
-        avg_ms = (
-            sum(r.response_time_ms for r in accessible) / len(accessible)
-            if accessible else 0.0
-        )
-
-        lines = [
-            "📊 **批量检查结果**",
-            (
-                f"总计 {len(results)}  ✅ {len(accessible)}  🔴 {len(failed)}"
-                + (f"  平均响应 {avg_ms:.0f}ms" if accessible else "")
-            ),
-            "",
-        ]
-        # 失败的置前
-        for r in (failed + accessible):
-            lines.append(r.format_brief())
-
-        yield event.plain_result("\n".join(lines))
-
-    # ------------------------------------------------------------------
-    # /check列表
-    # ------------------------------------------------------------------
+        yield event.plain_result(f"🔍 正在检查 {len(watchlist)} 个站点...")
+        results = await self._collect_results(watchlist)
+        yield event.plain_result(self._format_results(results))
 
     @filter.command("check列表")
     async def cmd_list_watchlist(self, event: AstrMessageEvent):
@@ -536,11 +465,11 @@ class WebCheckPlugin(Star):
 
         lines = ["📋 **Watchlist**\n"]
         for i, entry in enumerate(watchlist, 1):
-            if not isinstance(entry, str) or not entry.strip():
-                continue
-            u = _normalize_url(entry)
-            tag = " ⛔ 内网" if await _is_private_url(u) else ""
-            lines.append(f"{i}. {u}{tag}")
+            try:
+                u = _normalize_url(entry)
+                lines.append(f"{i}. {_display_url(u)}")
+            except ValueError:
+                lines.append(f"{i}. 输入错误：无效地址")
 
         lines.append("\n💡 使用 /批量检查 开始检查所有站点")
         yield event.plain_result("\n".join(lines))
