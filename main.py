@@ -86,6 +86,7 @@ def _short_err(exc: Exception, max_len: int = 80) -> str:
 
 def _fmt_size(b: float) -> str:
     """将字节数格式化为人类可读的大小字符串"""
+    b = float(b)
     for unit in ("B", "KB", "MB", "GB"):
         if b < 1024:
             return f"{b:.1f} {unit}"
