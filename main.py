@@ -205,6 +205,8 @@ class CheckResult:
     retries: int = 0
     error_kind: str = ""
     tls_verified: bool = True
+    declared_length: Optional[int] = None
+    content_truncated: bool = False
 
     @property
     def is_accessible(self) -> bool:
@@ -234,6 +236,7 @@ class CheckResult:
             return f"{self.status_emoji} {self.hostname}  ✗ {self.error}"
         retry_note = f" (重试{self.retries}次)" if self.retries else ""
         retry_note += " [HTTPS 证书未验证]" if not self.tls_verified else ""
+        retry_note += " [正文截断]" if self.content_truncated else ""
         return (
             f"{self.status_emoji} {self.hostname}  "
             f"HTTP {self.status_code}  {self.response_time_ms:.0f}ms{retry_note}"
@@ -253,8 +256,12 @@ class CheckResult:
         ]
         if not self.tls_verified:
             lines.append("  ⚠ HTTPS 证书未验证")
+        if self.declared_length is not None:
+            lines.append(f"  服务端声明长度：{_fmt_size(self.declared_length)}")
         if self.content_length > 0:
-            lines.append(f"  内容大小：{_fmt_size(self.content_length)}")
+            lines.append(f"  已读取正文：{_fmt_size(self.content_length)}")
+        if self.content_truncated:
+            lines.append("  正文已截断：达到 64 KiB 上限，未完整下载")
         if self.redirect_location:
             lines.append(f"  重定向至：{_display_url(self.redirect_location)}")
         if self.retries:
@@ -286,13 +293,18 @@ async def _check_once(
         while True:
             async with session.request(
                 method, current, timeout=aiohttp.ClientTimeout(total=timeout),
-                allow_redirects=False, ssl=verify_ssl,
+                allow_redirects=False, ssl=verify_ssl, auto_decompress=False,
             ) as resp:
                 if method == "HEAD" and resp.status == 405:
                     method = "GET"
                     continue
                 result.status_code = resp.status
                 result.response_time_ms = (time.monotonic() - start) * 1000
+                try:
+                    declared = int(resp.headers.get("Content-Length", ""))
+                    result.declared_length = declared if declared >= 0 else None
+                except (ValueError, TypeError):
+                    result.declared_length = None
                 location = resp.headers.get("Location", "")
                 if resp.status in (301, 302, 303, 307, 308) and location:
                     target = _normalize_url(str(URL(current).join(URL(location))))
@@ -306,7 +318,11 @@ async def _check_once(
                         current = target
                         continue
                 if method == "GET":
-                    result.content_length = len(await resp.read())
+                    async for chunk in resp.content.iter_chunked(8192):
+                        result.content_length += len(chunk)
+                        if result.content_length >= 65536:
+                            result.content_truncated = True
+                            break
                 break
     except ValueError:
         result.error_kind = "invalid"

@@ -6,6 +6,7 @@ import sys
 import types
 from pathlib import Path
 from unittest.mock import patch
+import aiohttp  # Load real dependencies before the temporary AstrBot module patch.
 
 
 class Event:
