@@ -52,6 +52,7 @@ _conf_schema = {
         "default": True,
         "description": "优先使用 HEAD 请求（不下载响应体，速度更快）",
     },
+    "verify_ssl": {"type": "bool", "default": True, "description": "验证 HTTPS 证书"},
     "follow_redirects": {
         "type": "bool",
         "default": False,
@@ -203,6 +204,7 @@ class CheckResult:
     error: str = ""
     retries: int = 0
     error_kind: str = ""
+    tls_verified: bool = True
 
     @property
     def is_accessible(self) -> bool:
@@ -231,6 +233,7 @@ class CheckResult:
         if self.error:
             return f"{self.status_emoji} {self.hostname}  ✗ {self.error}"
         retry_note = f" (重试{self.retries}次)" if self.retries else ""
+        retry_note += " [HTTPS 证书未验证]" if not self.tls_verified else ""
         return (
             f"{self.status_emoji} {self.hostname}  "
             f"HTTP {self.status_code}  {self.response_time_ms:.0f}ms{retry_note}"
@@ -248,6 +251,8 @@ class CheckResult:
             f"  状态码：{self.status_code}",
             f"  响应时间：{self.response_time_ms:.0f} ms",
         ]
+        if not self.tls_verified:
+            lines.append("  ⚠ HTTPS 证书未验证")
         if self.content_length > 0:
             lines.append(f"  内容大小：{_fmt_size(self.content_length)}")
         if self.redirect_location:
@@ -266,60 +271,64 @@ class CheckResult:
 async def _check_once(
     session: aiohttp.ClientSession,
     url: str,
-    timeout: int,
+    timeout: float,
     use_head: bool,
     follow_redirects: bool,
+    verify_ssl: bool = True,
 ) -> CheckResult:
-    """执行一次 HTTP 检查，不含重试逻辑"""
-    hostname = urlparse(url).hostname or url
-    result = CheckResult(url=url, hostname=hostname)
-    _timeout = aiohttp.ClientTimeout(total=timeout)
-
+    result = CheckResult(url=url, hostname="无效地址", tls_verified=verify_ssl)
+    start = time.monotonic()
     try:
-        start = time.monotonic()
-
-        # 优先 HEAD；若服务器返回 405 Method Not Allowed，自动降级为 GET
+        current = _normalize_url(url)
+        result.hostname = URL(current).host or ""
         method = "HEAD" if use_head else "GET"
-        async with session.request(
-            method, url,
-            timeout=_timeout, allow_redirects=follow_redirects, ssl=False,
-        ) as resp:
-            elapsed = time.monotonic() - start
-
-            if use_head and resp.status == 405:
-                # 服务器不支持 HEAD，改用 GET
-                async with session.get(
-                    url,
-                    timeout=_timeout, allow_redirects=follow_redirects, ssl=False,
-                ) as resp2:
-                    result.status_code = resp2.status
-                    result.response_time_ms = (time.monotonic() - start) * 1000
-                    result.content_length = len(await resp2.read())
-                    if result.is_redirect:
-                        result.redirect_location = resp2.headers.get("Location", "")
-            else:
+        redirects = 0
+        while True:
+            async with session.request(
+                method, current, timeout=aiohttp.ClientTimeout(total=timeout),
+                allow_redirects=False, ssl=verify_ssl,
+            ) as resp:
+                if method == "HEAD" and resp.status == 405:
+                    method = "GET"
+                    continue
                 result.status_code = resp.status
-                result.response_time_ms = elapsed * 1000
-                if not use_head:
+                result.response_time_ms = (time.monotonic() - start) * 1000
+                location = resp.headers.get("Location", "")
+                if resp.status in (301, 302, 303, 307, 308) and location:
+                    target = _normalize_url(str(URL(current).join(URL(location))))
+                    result.redirect_location = target
+                    if follow_redirects:
+                        if redirects >= 5:
+                            result.error = "重定向超过 5 跳"
+                            result.error_kind = "redirect"
+                            break
+                        redirects += 1
+                        current = target
+                        continue
+                if method == "GET":
                     result.content_length = len(await resp.read())
-                if result.is_redirect:
-                    result.redirect_location = resp.headers.get("Location", "")
-
+                break
+    except ValueError:
+        result.error_kind = "invalid"
+        result.error = "输入错误：网址或重定向地址不符合要求"
     except UnsafeTargetError:
         result.error_kind = "blocked"
         result.error = "安全拦截：目标地址不属于允许的公网范围"
     except asyncio.TimeoutError:
         result.error_kind = "network"
-        result.error = f"超时（>{timeout}s）"
-    except aiohttp.ClientSSLError as exc:
-        result.error = f"SSL 错误：{_short_err(exc)}"
+        result.error = f"连接超时（总期限 {timeout:g}s）"
+    except aiohttp.ClientSSLError:
+        result.error_kind = "tls"
+        result.error = "HTTPS 证书或 TLS 验证失败"
     except aiohttp.ClientConnectorError as exc:
+        result.error_kind = "network"
         result.error = f"连接失败：{_short_err(exc)}"
     except aiohttp.ClientError as exc:
+        result.error_kind = "network"
         result.error = f"请求异常：{_short_err(exc)}"
     except Exception as exc:
-        result.error = f"未知错误：{_short_err(exc)}"
-
+        result.error_kind = "internal"
+        result.error = f"检查异常：{_short_err(exc)}"
     return result
 
 
@@ -331,6 +340,7 @@ async def check_url(
     use_head: bool = True,
     follow_redirects: bool = False,
     retry: int = _DEFAULT_RETRY,
+    verify_ssl: bool = True,
 ) -> CheckResult:
     """
     带重试和指数退避的 URL 检查入口。
@@ -338,7 +348,7 @@ async def check_url(
     """
     result: Optional[CheckResult] = None
     for attempt in range(retry + 1):
-        result = await _check_once(session, url, timeout, use_head, follow_redirects)
+        result = await _check_once(session, url, timeout, use_head, follow_redirects, verify_ssl)
         if not result.error or attempt >= retry:
             result.retries = attempt
             break
@@ -410,6 +420,7 @@ class WebCheckPlugin(Star):
             use_head=self._cfg("use_head"),
             follow_redirects=self._cfg("follow_redirects"),
             retry=self._cfg("retry_count"),
+            verify_ssl=self._cfg("verify_ssl"),
         )
 
     def _make_semaphore(self) -> asyncio.Semaphore:

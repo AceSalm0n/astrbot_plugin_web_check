@@ -15,5 +15,10 @@
             "https://www.github.com",
             "https://www.bing.com"
         ]
+    },
+    "verify_ssl": {
+        "type": "bool",
+        "default": true,
+        "description": "验证 HTTPS 证书，关闭时结果标注未验证"
     }
 }
