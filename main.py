@@ -86,8 +86,18 @@ def _command_output(function):
 
 
 def _short_err(exc: Exception, max_len: int = 160) -> str:
-    """底层异常可能带凭据，用户只看到异常类别。"""
-    return type(exc).__name__[:max_len]
+    """仅输出预设诊断，不拼接可能含凭据的原始异常。"""
+    if isinstance(exc, aiohttp.ClientConnectorDNSError):
+        message = "DNS 解析失败，请检查域名拼写和服务器 DNS"
+    elif isinstance(exc, aiohttp.ClientConnectorError) and isinstance(exc.os_error, ConnectionRefusedError):
+        message = "目标拒绝连接，请检查服务是否运行及目标端口"
+    elif isinstance(exc, aiohttp.ServerDisconnectedError):
+        message = "服务器提前断开连接，请稍后重试"
+    elif isinstance(exc, aiohttp.ClientPayloadError):
+        message = "响应正文读取失败，服务器可能提前中断传输"
+    else:
+        message = "请求未完成，请检查目标地址、端口和服务器网络"
+    return message[:max_len]
 
 
 def _display_url(url: str) -> str:
@@ -148,6 +158,10 @@ def _is_reserved_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
 class UnsafeTargetError(aiohttp.ClientError):
     """实际连接地址违反公网访问策略。"""
 
+    def __init__(self, *args, fake_ip=False):
+        self.fake_ip = fake_ip is True
+        super().__init__("安全拦截：目标地址不属于允许的公网范围")
+
 
 class SafeTCPConnector(aiohttp.TCPConnector):
     async def _resolve_host(self, host, port, traces=None):
@@ -156,8 +170,11 @@ class SafeTCPConnector(aiohttp.TCPConnector):
         if not addresses:
             raise OSError("DNS 未返回地址")
         for entry in addresses:
-            if _is_reserved_ip(ipaddress.ip_address(entry["host"])):
-                raise UnsafeTargetError("安全拦截：目标地址不属于允许的公网范围")
+            ip = ipaddress.ip_address(entry["host"])
+            if _is_reserved_ip(ip):
+                candidate = ip.ipv4_mapped if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped else ip
+                benchmark = ipaddress.ip_network("198.18.0.0/15" if candidate.version == 4 else "2001:2::/48")
+                raise UnsafeTargetError(fake_ip=candidate in benchmark)
         return addresses
 
 
@@ -343,13 +360,14 @@ async def _check_once(
     except ValueError:
         result.error_kind = "invalid"
         result.error = "输入错误：网址或重定向地址不符合要求"
-    except UnsafeTargetError:
+    except UnsafeTargetError as exc:
         result.error_kind = "blocked"
-        result.error = "安全拦截：目标地址不属于允许的公网范围"
+        result.error = ("安全拦截：基准测试保留地址，可能是代理 Fake-IP；请检查代理/DNS 设置"
+                        if exc.fake_ip else "安全拦截：目标地址不属于允许的公网范围")
     except asyncio.TimeoutError:
         result.retriable = True
         result.error_kind = "network"
-        result.error = f"连接超时（总期限 {timeout:g}s）"
+        result.error = f"连接或响应超时（总期限 {timeout:g}s），请检查目标和服务器网络"
     except aiohttp.ClientConnectionError as exc:
         result.retriable = not isinstance(exc, aiohttp.ClientConnectorDNSError)
         result.error_kind = "network"
