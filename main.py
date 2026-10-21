@@ -1,5 +1,5 @@
 """
-AstrBot 网站连通性检查插件 v2.0.1
+AstrBot 网站连通性检查插件 v2.0.2
 检查指定网站在当前网络环境下能否被正常访问
 
 命令：
@@ -410,7 +410,7 @@ async def check_url(
     "astrbot_plugin_web_check",
     "AceSalm0n",
     "检查网站在当前网络环境下能否被正常访问，支持单站点、多站点和批量检查",
-    "2.0.1",
+    "2.0.2",
     "https://github.com/AceSalm0n/astrbot_plugin_web_check",
 )
 class WebCheckPlugin(Star):
@@ -427,7 +427,7 @@ class WebCheckPlugin(Star):
         self._stopping = False
         self._tasks = set()
         self._terminate_lock = asyncio.Lock()
-        logger.info("[WebCheck] 插件已加载 v2.0.1")
+        logger.info("[WebCheck] 插件已加载 v2.0.2")
 
     # ------------------------------------------------------------------
     # 配置读取
@@ -578,7 +578,7 @@ class WebCheckPlugin(Star):
         """检查一个或多个 URL。"""
         raw_parts = url.split()
         if not raw_parts:
-            yield ("📌 用法：/check <url> [url2 ...]\n示例：/check baidu.com github.com")
+            yield ("📌 用法：/check <url> [url2 ...]\n示例：/check baidu.com github.com\n唤醒前缀以后台配置为准。")
             return
         self._limit_targets(raw_parts)
         label = _display_url(raw_parts[0]) if len(raw_parts) == 1 else f"{len(raw_parts)} 个站点"
@@ -633,7 +633,7 @@ class WebCheckPlugin(Star):
         session_ok = self._session is not None and not self._session.closed
         lines = [
             "🌐 **WebCheck 插件状态**\n",
-            f"版本：2.0.1",
+            f"版本：2.0.2",
             f"超时：{self._cfg('check_timeout')}s",
             f"最大并发：{self._cfg('max_concurrent')}（插件共享）",
             f"每次目标上限：{self._cfg('max_sites')}",
@@ -660,6 +660,7 @@ class WebCheckPlugin(Star):
             "/check列表                查看 watchlist 内容\n"
             "/check状态                查看插件配置和运行状态\n"
             "/check帮助                显示此帮助\n\n"
+            "💡 以上 / 为示例唤醒前缀，实际以后台配置为准\n"
             "💡 URL 可省略 https://，插件会自动补全\n"
             "💡 批量检查的站点列表请在管理后台插件配置中设置"
         )

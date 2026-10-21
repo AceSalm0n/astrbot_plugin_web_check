@@ -2,7 +2,7 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 
-WebCheck 2.0.1 是 AstrBot 网站连通性检查插件，支持单站点、多站点和配置列表检查，检查反映 AstrBot 所在服务器的网络状况。历史验收问题及修复进度见下方记录。
+WebCheck 2.0.2 是 AstrBot 网站连通性检查插件，支持单站点、多站点和配置列表检查，检查反映 AstrBot 所在服务器的网络状况。历史验收问题及修复进度见下方记录。
 
 ## 安装
 
@@ -24,7 +24,7 @@ python -m pip install -r requirements.txt
 | `/check状态` | 查看配置和 HTTP 会话状态 |
 | `/check帮助` | 查看帮助 |
 
-以上示例使用 `/` 唤醒前缀，实际使用应以 AstrBot 后台配置为准。本次环境的前缀为 `#`，例如 `#check www.baidu.com`、`#批量检查`；插件内置帮助仍显示 `/`。
+以上示例使用 `/` 唤醒前缀，实际使用应以 AstrBot 后台配置为准。本次环境的前缀为 `#`，例如 `#check www.baidu.com`、`#批量检查`；内置帮助也明确提示以后台配置的唤醒前缀为准。
 
 网址省略协议时补 HTTPS，只接受 HTTP/HTTPS，检查主机与端口，拒绝含用户名或密码的地址。显示时隐藏查询参数值及片段；watchlist 中的无效目标逐项反馈，不影响其他目标。
 
@@ -72,7 +72,13 @@ python -B -X utf8 -m unittest discover -s tests -v
 
 测试采用标准库 unittest、AstrBot 接口桩和受控 DNS/HTTP 响应，覆盖命令、输入、安全地址、TLS、跳转、正文预算、总期限、重试、配置、共享并发、消息分段与卸载竞态。这些测试不代表真实 AstrBot 环境运行验收。
 
-## 真实环境验收（2026-10-10）
+## 优化后的真实验收（2026-10-22）
+
+已通过用户已登录的浏览器，在运行中 AstrBot 4.28.0 的 WebChat 验证 2.0.2：多网址汇总、空参数、51 个目标超过 50 上限的拒绝、IPv4/IPv6 环回拦截、非法输入/凭据脱敏、HTTP 响应、查询脱敏及热重载后的命令均正常。真实 TLS 失败通过测试站点的公网 IP 验证，正确显示 HTTPS/TLS 错误。
+
+本机存在 Fake-IP DNS：`expired.badssl.com` 系统解析为受限地址，因此过期域名用例在 TLS 握手前被安全拦截；默认 watchlist 的四个目标也都被拦截。不能将此结果表述为这些域名已经连通或过期证书用例已端到端通过。未修改宿主的代理、DNS、插件配置或消息平台设置；详细结果见[优化验收记录](docs/optimization-results.md)。
+
+## 历史真实环境验收（2026-10-10）
 
 环境：AstrBot 4.28.0、Python 3.10.6、aiohttp 3.13.5、WebCheck 2.0.1。Launcher 的运行进程使用系统 Python，目录内另一个 venv 的 aiohttp 3.13.2 不代表正在运行的环境。
 
@@ -98,7 +104,7 @@ python -B -X utf8 -m unittest discover -s tests -v
 - 历史证书错误分类问题已修复：TLS 异常优先于 ValueError 捕获，真实 ClientConnectorCertificateError 回归验证分类为 TLS 失败且不重试；证书验证始终生效。
 - 此前 DNS 诊断曾得到 Mihomo Fake-IP 地址 `198.18.0.x`、`2001:2::x` 并复现安全拦截。上述地址属于受限范围；本次实时 WebChat 的批量结果已收到三个站点响应，应分别看待不同时间和执行环境的网络结果。Google 连通性本次未通过。
 
-本次仅记录验收结果，保留上述问题，不能据此宣称插件整体运行验收通过。
+本节为 2026-10-10 的历史记录，修复状态和最新限制以 2026-10-22 的验收及优化记录为准。
 
 ## 项目结构
 
@@ -109,6 +115,7 @@ python -B -X utf8 -m unittest discover -s tests -v
 | [metadata.yaml](metadata.yaml) | 插件元数据 |
 | [requirements.txt](requirements.txt) | aiohttp 依赖声明 |
 | [update_log.md](update_log.md) | 更新日志 |
+| [docs/optimization-results.md](docs/optimization-results.md) | 优化验收记录 |
 
 ## 参考与协议
 

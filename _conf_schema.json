@@ -7,7 +7,7 @@
     },
     "watchlist": {
         "description": "批量检查站点列表",
-        "hint": "需要批量检查的 URL 列表，使用 /批量检查 指令触发",
+        "hint": "需要批量检查的 URL 列表，使用批量检查指令触发，唤醒前缀以后台配置为准",
         "type": "list",
         "default": [
             "https://www.baidu.com",
