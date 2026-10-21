@@ -2,7 +2,7 @@
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 
-WebCheck 2.0.1 是 AstrBot 网站连通性检查插件，支持单站点和配置列表检查，检查反映 AstrBot 所在服务器的网络状况。`/check` 多站点在 AstrBot 4.28.0 中存在已知限制，见下方验收记录。
+WebCheck 2.0.1 是 AstrBot 网站连通性检查插件，支持单站点、多站点和配置列表检查，检查反映 AstrBot 所在服务器的网络状况。历史验收问题及修复进度见下方记录。
 
 ## 安装
 
@@ -18,7 +18,7 @@ python -m pip install -r requirements.txt
 
 | 指令 | 说明 |
 | --- | --- |
-| `/check <url> [url2 ...]` | 单站点返回详情；当前 AstrBot 4.28.0 会忽略第二个及后续目标 |
+| `/check <url> [url2 ...]` | 单站点返回详情；多个目标返回汇总，空白分隔 |
 | `/批量检查` | 检查配置的 watchlist |
 | `/check列表` | 展示列表及逐项输入错误，不发起 DNS 或 HTTP 请求 |
 | `/check状态` | 查看配置和 HTTP 会话状态 |
@@ -45,7 +45,7 @@ python -m pip install -r requirements.txt
 | `check_timeout` | int | 10 | 1–120 秒，单站点总期限 |
 | `max_concurrent` | int | 5 | 1–20，跨命令共享 |
 | `retry_count` | int | 1 | 0–3，暂时性连接错误的重试次数 |
-| `max_sites` | int | 50 | 1–100，watchlist 超限拒绝整次检查；当前 `/check` 多目标入口受已知解析问题影响 |
+| `max_sites` | int | 50 | 1–100，命令输入或 watchlist 超限均拒绝整次检查 |
 | `use_head` | bool | true | HEAD 优先，405 回退 GET |
 | `follow_redirects` | bool | false | 手动跟随，最多 5 跳 |
 | `verify_ssl` | bool | true | HTTPS 证书验证 |
@@ -60,7 +60,7 @@ python -m pip install -r requirements.txt
 
 结果分别统计 2xx 正常响应、3xx 重定向、4xx/5xx HTTP 错误、网络失败、安全拦截和输入错误。204 属于正常响应，404/500 计入 HTTP 错误。另行统计“HTTP 有响应”，包括错误状态码以及收到响应头后正文超时的目标。
 
-watchlist 汇总包含全部条目，异常目标排列在前，消息自动分段，每条不超过 1800 字符。`/check` 多网址输入目前存在下述解析限制。响应耗时记录从检查开始到收到当前响应头的时间，包括此前跳转与重试等待；不包含后续正文读取时间。
+汇总包含全部条目，异常目标排列在前，消息自动分段，每条不超过 1800 字符。响应耗时记录从检查开始到收到当前响应头的时间，包括此前跳转与重试等待；不包含后续正文读取时间。
 
 ## 开发与验证
 
@@ -94,7 +94,7 @@ python -B -X utf8 -m unittest discover -s tests -v
 
 已知问题与使用限制：
 
-- AstrBot 4.28.0 的 CommandFilter 对带默认值的参数使用默认值推断类型；当前 `url: GreedyStr = ""` 因此按普通字符串解析，只保留第一个网址。暂时逐个执行 `/check`，多个目标使用 watchlist 和 `/批量检查`。`max_sites` 的整次拒绝不能依赖当前 `/check` 多网址入口。
+- 历史多网址解析问题已修复：移除 GreedyStr 参数默认值，使用真实 AstrBot 4.28.0 注册器和 CommandFilter 回归验证多网址、空参数及数量限制；旧验收结果保留用于对照。后续运行中服务验收见[优化验收记录](docs/optimization-results.md)。
 - 实际 `ClientConnectorCertificateError` 同时属于 `ValueError` 和 `ClientSSLError`，当前先捕获 `ValueError` 导致证书错误分类不正确；证书验证仍然生效，没有放行过期证书。
 - 此前 DNS 诊断曾得到 Mihomo Fake-IP 地址 `198.18.0.x`、`2001:2::x` 并复现安全拦截。上述地址属于受限范围；本次实时 WebChat 的批量结果已收到三个站点响应，应分别看待不同时间和执行环境的网络结果。Google 连通性本次未通过。
 

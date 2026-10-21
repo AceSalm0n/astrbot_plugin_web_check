@@ -574,7 +574,7 @@ class WebCheckPlugin(Star):
 
     @filter.command("check")
     @_command_output
-    async def cmd_check(self, event: AstrMessageEvent, url: GreedyStr = ""):
+    async def cmd_check(self, event: AstrMessageEvent, url: GreedyStr):
         """检查一个或多个 URL。"""
         raw_parts = url.split()
         if not raw_parts:
