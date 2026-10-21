@@ -335,6 +335,9 @@ async def _check_once(
                         result.content_length += len(chunk)
                     result.content_truncated = result.content_length == 65536 and not resp.content.at_eof()
                 break
+    except aiohttp.ClientSSLError:
+        result.error_kind = "tls"
+        result.error = "HTTPS 证书或 TLS 验证失败"
     except ValueError:
         result.error_kind = "invalid"
         result.error = "输入错误：网址或重定向地址不符合要求"
@@ -345,9 +348,6 @@ async def _check_once(
         result.retriable = True
         result.error_kind = "network"
         result.error = f"连接超时（总期限 {timeout:g}s）"
-    except aiohttp.ClientSSLError:
-        result.error_kind = "tls"
-        result.error = "HTTPS 证书或 TLS 验证失败"
     except aiohttp.ClientConnectionError as exc:
         result.retriable = not isinstance(exc, aiohttp.ClientConnectorDNSError)
         result.error_kind = "network"

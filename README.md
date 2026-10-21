@@ -95,7 +95,7 @@ python -B -X utf8 -m unittest discover -s tests -v
 已知问题与使用限制：
 
 - 历史多网址解析问题已修复：移除 GreedyStr 参数默认值，使用真实 AstrBot 4.28.0 注册器和 CommandFilter 回归验证多网址、空参数及数量限制；旧验收结果保留用于对照。后续运行中服务验收见[优化验收记录](docs/optimization-results.md)。
-- 实际 `ClientConnectorCertificateError` 同时属于 `ValueError` 和 `ClientSSLError`，当前先捕获 `ValueError` 导致证书错误分类不正确；证书验证仍然生效，没有放行过期证书。
+- 历史证书错误分类问题已修复：TLS 异常优先于 ValueError 捕获，真实 ClientConnectorCertificateError 回归验证分类为 TLS 失败且不重试；证书验证始终生效。
 - 此前 DNS 诊断曾得到 Mihomo Fake-IP 地址 `198.18.0.x`、`2001:2::x` 并复现安全拦截。上述地址属于受限范围；本次实时 WebChat 的批量结果已收到三个站点响应，应分别看待不同时间和执行环境的网络结果。Google 连通性本次未通过。
 
 本次仅记录验收结果，保留上述问题，不能据此宣称插件整体运行验收通过。
