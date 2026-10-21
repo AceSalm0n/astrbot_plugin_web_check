@@ -44,6 +44,8 @@ python -m pip install -r requirements.txt
 | --- | --- | --- | --- |
 | `check_timeout` | int | 10 | 1–120 秒，单站点总期限 |
 | `max_concurrent` | int | 5 | 1–20，跨命令共享 |
+| `max_pending_targets` | int | 200 | 1–1000，所有在途批次的目标预留总量，含执行和排队；容量不足整批拒绝 |
+| `queue_timeout` | int | 30 | 1–120 秒，取得并发名额前的等待上限 |
 | `retry_count` | int | 1 | 0–3，暂时性连接错误的重试次数 |
 | `max_sites` | int | 50 | 1–100，命令输入或 watchlist 超限均拒绝整次检查 |
 | `use_head` | bool | true | HEAD 优先，405 回退 GET |
@@ -57,6 +59,8 @@ python -m pip install -r requirements.txt
 检查进行中变更 `max_concurrent` 后，新检查会提示等待在途检查结束再重试，避免多个并发限制同时生效。User-Agent 在创建会话时应用；修改后重载插件以应用到已有会话。
 
 ## 结果说明
+
+每批接纳时预留全部目标容量，直到该批结束、取消或卸载才统一归还，避免连续命令无限堆积。排队超时逐项返回结果，不取消其他正在执行的检查；`queue_timeout` 与取得名额后的 `check_timeout` 分别计时。
 
 结果分别统计 2xx 正常响应、3xx 重定向、4xx/5xx HTTP 错误、网络失败、安全拦截和输入错误。204 属于正常响应，404/500 计入 HTTP 错误。另行统计“HTTP 有响应”，包括错误状态码以及收到响应头后正文超时的目标。
 

@@ -421,9 +421,10 @@ class WebCheckPlugin(Star):
         self.config: AstrBotConfig = config if config is not None else {}
         self._session: Optional[aiohttp.ClientSession] = None
         self._session_lock = asyncio.Lock()
-        self._semaphore = None
+        self._limiter = None
         self._concurrency_limit = None
         self._runs = 0
+        self._pending_targets = 0
         self._stopping = False
         self._tasks = set()
         self._terminate_lock = asyncio.Lock()
@@ -438,7 +439,8 @@ class WebCheckPlugin(Star):
             raise ConfigError("配置错误：插件配置必须是对象")
         values = {key: self.config.get(key, deepcopy(spec["default"])) for key, spec in _conf_schema.items()}
         bounds = {"check_timeout": (1, 120), "max_concurrent": (1, 20),
-                  "retry_count": (0, 3), "max_sites": (1, 100)}
+                  "retry_count": (0, 3), "max_sites": (1, 100),
+                  "max_pending_targets": (1, 1000), "queue_timeout": (1, 120)}
         for key, (low, high) in bounds.items():
             value = values[key]
             if type(value) is not int or not low <= value <= high:
@@ -512,28 +514,49 @@ class WebCheckPlugin(Star):
             verify_ssl=self._cfg("verify_ssl"),
         )
 
-    def _make_semaphore(self) -> asyncio.Semaphore:
+    def _make_limiter(self) -> asyncio.Queue:
         limit = self._cfg("max_concurrent")
         if self._concurrency_limit != limit:
             if self._runs:
                 raise ConfigError("配置错误：max_concurrent 已变更，请等待在途检查结束后重试。")
-            self._semaphore = asyncio.Semaphore(limit)
+            self._limiter = asyncio.Queue(maxsize=limit)
+            for _ in range(limit):
+                self._limiter.put_nowait(None)
             self._concurrency_limit = limit
-        return self._semaphore
+        return self._limiter
 
     async def _collect_results(self, raw_list: List) -> List[CheckResult]:
         self._ensure_running()
         self._limit_targets(raw_list)
-        sem = self._make_semaphore()
+        limiter = self._make_limiter()
+        capacity = self._cfg("max_pending_targets")
+        if self._pending_targets + len(raw_list) > capacity:
+            raise CommandError(f"检查繁忙：待处理目标容量 {capacity} 已不足，本批未开始，请稍后重试。")
+        queue_timeout = self._cfg("queue_timeout")
 
         async def bounded(raw) -> CheckResult:
             try:
                 url = _normalize_url(raw)
             except ValueError as exc:
                 return CheckResult("", "无效地址", error=str(exc), error_kind="invalid")
-            async with sem:
+            acquisition = asyncio.create_task(limiter.get())
+            try:
+                try:
+                    await asyncio.wait_for(acquisition, timeout=queue_timeout)
+                except asyncio.TimeoutError:
+                    return CheckResult(url, URL(url).host or "", error_kind="queue",
+                                       error=f"排队超时（等待上限 {queue_timeout}s），请稍后重试")
                 self._ensure_running()
                 return await self._do_check(url)
+            finally:
+                # A completed acquisition owns a token even if cancellation won the await.
+                acquisition.cancel()
+                try:
+                    await acquisition
+                except asyncio.CancelledError:
+                    pass
+                else:
+                    limiter.put_nowait(None)
 
         async def run():
             children = [asyncio.create_task(bounded(raw)) for raw in raw_list]
@@ -546,6 +569,7 @@ class WebCheckPlugin(Star):
                 await asyncio.gather(*children, return_exceptions=True)
 
         self._runs += 1
+        self._pending_targets += len(raw_list)
         task = asyncio.create_task(run(), name="webcheck-batch")
         self._tasks.add(task)
         try:
@@ -553,6 +577,7 @@ class WebCheckPlugin(Star):
         finally:
             self._tasks.discard(task)
             self._runs -= 1
+            self._pending_targets -= len(raw_list)
 
     def _format_results(self, results: List[CheckResult]) -> str:
         if len(results) == 1:
@@ -637,6 +662,8 @@ class WebCheckPlugin(Star):
             f"超时：{self._cfg('check_timeout')}s",
             f"最大并发：{self._cfg('max_concurrent')}（插件共享）",
             f"每次目标上限：{self._cfg('max_sites')}",
+            f"在途批次预留目标：{self._pending_targets}/{self._cfg('max_pending_targets')}",
+            f"排队等待上限：{self._cfg('queue_timeout')}s",
             f"失败重试：{self._cfg('retry_count')} 次",
             f"HEAD 优先：{'是' if self._cfg('use_head') else '否'}",
             f"跟随重定向：{'是' if self._cfg('follow_redirects') else '否'}",

@@ -26,6 +26,17 @@
         "default": 5,
         "description": "插件共享的最大检查并发数（1–20）"
     },
+    "max_pending_targets": {
+        "type": "int",
+        "default": 200,
+        "description": "插件在途批次的目标预留总量上限（1–1000，含执行中和等待中）",
+        "hint": "整批接纳或拒绝；批次结束、取消或卸载时归还预留量"
+    },
+    "queue_timeout": {
+        "type": "int",
+        "default": 30,
+        "description": "取得并发名额前的排队等待上限（秒，1–120）"
+    },
     "retry_count": {
         "type": "int",
         "default": 1,
