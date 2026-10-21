@@ -208,3 +208,15 @@ __marimo__/
 
 
 .claude
+
+# Local development files (not needed by the plugin runtime)
+/tests/
+AGENTS.md
+agent.md
+CLAUDE.md
+GEMINI.md
+/.agents/
+/.codex/
+/.idea/
+/.vscode/
+/docs/superpowers/
