@@ -291,6 +291,7 @@ async def _check_once(
     *,
     result: Optional[CheckResult] = None,
     started_at: Optional[float] = None,
+    user_agent: str = _conf_schema["user_agent"]["default"],
 ) -> CheckResult:
     if result is None:
         result = CheckResult(url=url, hostname="无效地址", tls_verified=verify_ssl)
@@ -304,6 +305,7 @@ async def _check_once(
             async with session.request(
                 method, current, timeout=aiohttp.ClientTimeout(total=timeout),
                 allow_redirects=False, ssl=verify_ssl, auto_decompress=False,
+                headers={"User-Agent": user_agent},
             ) as resp:
                 result.status_code = resp.status
                 result.response_time_ms = (time.monotonic() - start) * 1000
@@ -370,6 +372,7 @@ async def check_url(
     follow_redirects: bool = _conf_schema["follow_redirects"]["default"],
     retry: int = _DEFAULT_RETRY,
     verify_ssl: bool = _conf_schema["verify_ssl"]["default"],
+    user_agent: str = _conf_schema["user_agent"]["default"],
 ) -> CheckResult:
     """一个总期限覆盖解析、请求、回退、重定向、正文及重试等待。"""
     started = time.monotonic()
@@ -382,7 +385,7 @@ async def check_url(
             remaining = max(0.001, timeout - before_attempt)
             last = CheckResult(url, "无效地址", tls_verified=verify_ssl, retries=attempt)
             await _check_once(session, url, remaining, use_head, follow_redirects, verify_ssl,
-                              result=last, started_at=started)
+                              result=last, started_at=started, user_agent=user_agent)
             if not last.error or not last.retriable or attempt == retry:
                 return last
             await asyncio.sleep(0.5 * (2 ** attempt))
@@ -453,13 +456,14 @@ class WebCheckPlugin(Star):
         agent = values["user_agent"]
         if not isinstance(agent, str) or not agent.strip() or len(agent) > 256 or any(ord(ch) < 32 or ord(ch) == 127 for ch in agent):
             raise ConfigError("配置错误：user_agent 必须是 1–256 字符且无控制字符的文本")
+        values["watchlist"] = list(values["watchlist"])
         return values
 
     def _cfg(self, key: str):
         return self._validated_config()[key]
 
-    def _limit_targets(self, targets):
-        maximum = self._cfg("max_sites")
+    def _limit_targets(self, targets, config=None):
+        maximum = (self._validated_config() if config is None else config)["max_sites"]
         if len(targets) > maximum:
             raise CommandError(f"检查被拒绝：{len(targets)} 个目标超过上限 {maximum}，请拆分检查或调整 max_sites。")
 
@@ -476,7 +480,6 @@ class WebCheckPlugin(Star):
             self._ensure_running()
             if self._session is None or self._session.closed:
                 self._session = aiohttp.ClientSession(
-                    headers={"User-Agent": self._cfg("user_agent")},
                     connector=SafeTCPConnector(), cookie_jar=aiohttp.DummyCookieJar(),
                 )
             return self._session
@@ -501,21 +504,22 @@ class WebCheckPlugin(Star):
     # 内部工具
     # ------------------------------------------------------------------
 
-    async def _do_check(self, url: str) -> CheckResult:
+    async def _do_check(self, url: str, config=None) -> CheckResult:
         """读取当前配置，执行带重试的 URL 检查"""
+        config = self._validated_config() if config is None else config
         session = await self._get_session()
         return await check_url(
             session,
             url,
-            timeout=self._cfg("check_timeout"),
-            use_head=self._cfg("use_head"),
-            follow_redirects=self._cfg("follow_redirects"),
-            retry=self._cfg("retry_count"),
-            verify_ssl=self._cfg("verify_ssl"),
+            timeout=config["check_timeout"],
+            use_head=config["use_head"],
+            follow_redirects=config["follow_redirects"],
+            retry=config["retry_count"],
+            verify_ssl=config["verify_ssl"],
+            user_agent=config["user_agent"],
         )
 
-    def _make_limiter(self) -> asyncio.Queue:
-        limit = self._cfg("max_concurrent")
+    def _make_limiter(self, limit: int) -> asyncio.Queue:
         if self._concurrency_limit != limit:
             if self._runs:
                 raise ConfigError("配置错误：max_concurrent 已变更，请等待在途检查结束后重试。")
@@ -527,12 +531,14 @@ class WebCheckPlugin(Star):
 
     async def _collect_results(self, raw_list: List) -> List[CheckResult]:
         self._ensure_running()
-        self._limit_targets(raw_list)
-        limiter = self._make_limiter()
-        capacity = self._cfg("max_pending_targets")
+        raw_list = list(raw_list)
+        config = self._validated_config()
+        self._limit_targets(raw_list, config)
+        limiter = self._make_limiter(config["max_concurrent"])
+        capacity = config["max_pending_targets"]
         if self._pending_targets + len(raw_list) > capacity:
             raise CommandError(f"检查繁忙：待处理目标容量 {capacity} 已不足，本批未开始，请稍后重试。")
-        queue_timeout = self._cfg("queue_timeout")
+        queue_timeout = config["queue_timeout"]
 
         async def bounded(raw) -> CheckResult:
             try:
@@ -544,10 +550,10 @@ class WebCheckPlugin(Star):
                 try:
                     await asyncio.wait_for(acquisition, timeout=queue_timeout)
                 except asyncio.TimeoutError:
-                    return CheckResult(url, URL(url).host or "", error_kind="queue",
+                    return CheckResult(url, URL(url).host or "", error_kind="queue", tls_verified=config["verify_ssl"],
                                        error=f"排队超时（等待上限 {queue_timeout}s），请稍后重试")
                 self._ensure_running()
-                return await self._do_check(url)
+                return await self._do_check(url, config)
             finally:
                 # A completed acquisition owns a token even if cancellation won the await.
                 acquisition.cancel()

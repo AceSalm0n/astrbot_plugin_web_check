@@ -56,7 +56,7 @@ python -m pip install -r requirements.txt
 
 默认列表为 `https://www.baidu.com`、`https://www.google.com`、`https://www.github.com`、`https://www.bing.com`。
 
-检查进行中变更 `max_concurrent` 后，新检查会提示等待在途检查结束再重试，避免多个并发限制同时生效。User-Agent 在创建会话时应用；修改后重载插件以应用到已有会话。
+每批开始时固定已验证的配置和目标列表；批次进行中修改超时、重试、TLS 等设置不会改变该批次策略，新设置用于下一批。User-Agent 按请求发送，后续批次无需重建会话即可使用新值。检查进行中变更 `max_concurrent` 后，新检查会提示等待在途检查结束再重试，避免多个并发限制同时生效。
 
 ## 结果说明
 
