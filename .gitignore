@@ -219,4 +219,16 @@ GEMINI.md
 /.codex/
 /.idea/
 /.vscode/
-/docs/superpowers/
+/docs/
+/.superpowers/
+/update_log.md
+/cover.png
+
+# Local runtime state, temporary exports and backups
+/data/
+/logs/
+/temp/
+/tmp/
+/backups/
+*.tmp
+*.bak
