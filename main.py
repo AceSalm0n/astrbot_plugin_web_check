@@ -21,8 +21,8 @@ from functools import wraps
 from pathlib import Path
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
-from urllib.parse import urlparse, urlsplit, urlunsplit, parse_qsl, urlencode
+from typing import List, Optional
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 from yarl import URL
 
@@ -176,37 +176,6 @@ class SafeTCPConnector(aiohttp.TCPConnector):
                 benchmark = ipaddress.ip_network("198.18.0.0/15" if candidate.version == 4 else "2001:2::/48")
                 raise UnsafeTargetError(fake_ip=candidate in benchmark)
         return addresses
-
-
-async def _is_private_url(url: str) -> bool:
-    """
-    SSRF 防护：解析 URL 的主机名，检测其是否解析到私有/保留地址。
-    对 IPv4 和 IPv6 均有效。
-    """
-    parsed = urlparse(url)
-    hostname = parsed.hostname
-    if not hostname:
-        return True  # 无法解析 hostname → 拒绝
-
-    # 主机名本身就是 IP 地址
-    try:
-        ip = ipaddress.ip_address(hostname)
-        return _is_reserved_ip(ip)
-    except ValueError:
-        pass  # 不是 IP，继续 DNS 解析
-
-    try:
-        loop = asyncio.get_running_loop()
-        addrs = await loop.getaddrinfo(hostname, None)
-        for info in addrs:
-            ip = ipaddress.ip_address(info[4][0])
-            if _is_reserved_ip(ip):
-                return True
-    except OSError:
-        # DNS 解析失败 —— 留给 HTTP 层自行报错，不在此拦截
-        return False
-
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -565,11 +534,11 @@ class WebCheckPlugin(Star):
                 return CheckResult("", "无效地址", error=str(exc), error_kind="invalid")
             acquisition = asyncio.create_task(limiter.get())
             try:
-                try:
-                    await asyncio.wait_for(acquisition, timeout=queue_timeout)
-                except asyncio.TimeoutError:
+                acquired, _ = await asyncio.wait({acquisition}, timeout=queue_timeout)
+                if not acquired:
                     return CheckResult(url, URL(url).host or "", error_kind="queue", tls_verified=config["verify_ssl"],
                                        error=f"排队超时（等待上限 {queue_timeout}s），请稍后重试")
+                acquisition.result()
                 self._ensure_running()
                 return await self._do_check(url, config)
             finally:
