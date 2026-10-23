@@ -16,6 +16,11 @@
             "https://www.bing.com"
         ]
     },
+    "watchlist_admin_only": {
+        "type": "bool",
+        "default": true,
+        "description": "仅 AstrBot 管理员可查看和批量检查 watchlist"
+    },
     "verify_ssl": {
         "type": "bool",
         "default": true,

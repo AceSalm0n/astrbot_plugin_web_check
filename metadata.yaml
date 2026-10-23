@@ -1,6 +1,6 @@
 name: astrbot_plugin_web_check # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
 display_name: WebCheck # 插件展示名称
 desc: 网站连通性检查插件，支持单/多站点检查、批量检查、HEAD 优先请求、重试退避、SSRF 防护。 # 插件简短描述
-version: v2.0.2 # 插件版本号。格式：v1.1.1 或者 v1.1
+version: v2.0.3 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: AceSalm0n # 作者
 repo: https://github.com/AceSalm0n/astrbot_plugin_web_check # 插件的仓库地址

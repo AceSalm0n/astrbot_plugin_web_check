@@ -1,5 +1,5 @@
 """
-AstrBot 网站连通性检查插件 v2.0.2
+AstrBot 网站连通性检查插件 v2.0.3
 检查指定网站在当前网络环境下能否被正常访问
 
 命令：
@@ -22,7 +22,7 @@ from pathlib import Path
 import time
 from dataclasses import dataclass
 from typing import List, Optional
-from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+from urllib.parse import urlsplit
 
 from yarl import URL
 
@@ -76,6 +76,15 @@ def _command_output(function):
     async def wrapped(self, event, *args, **kwargs):
         try:
             self._ensure_running()
+            if function.__name__ in ("cmd_batch_check", "cmd_list_watchlist"):
+                if not isinstance(self.config, Mapping):
+                    raise ConfigError("配置错误：插件配置必须是对象")
+                restricted = self.config.get("watchlist_admin_only", True)
+                if type(restricted) is not bool:
+                    raise ConfigError("配置错误：watchlist_admin_only 必须为布尔值")
+                if restricted and not event.is_admin():
+                    yield event.plain_result("此指令仅限 AstrBot 管理员使用。")
+                    return
             self._validated_config()
             async for text in function(self, event, *args, **kwargs):
                 for part in _split_messages(text):
@@ -108,8 +117,10 @@ def _display_url(url: str) -> str:
             host = f"[{host}]"
         if parsed.port:
             host += f":{parsed.port}"
-        query = urlencode([(key, "隐藏") for key, _ in parse_qsl(parsed.query, keep_blank_values=True)])
-        return urlunsplit((parsed.scheme, host, parsed.path, query, ""))[:200]
+        origin = f"{parsed.scheme}://{host}"
+        if len(origin) > 180:
+            origin = origin[:177] + "..."
+        return f"{origin} 路径及参数已隐藏"
     except (ValueError, TypeError):
         return "无效地址"
 
@@ -443,7 +454,7 @@ async def check_url(
     "astrbot_plugin_web_check",
     "AceSalm0n",
     "检查网站在当前网络环境下能否被正常访问，支持单站点、多站点和批量检查",
-    "2.0.2",
+    "2.0.3",
     "https://github.com/AceSalm0n/astrbot_plugin_web_check",
 )
 class WebCheckPlugin(Star):
@@ -469,7 +480,7 @@ class WebCheckPlugin(Star):
         self._stopping = False
         self._tasks = set()
         self._terminate_lock = asyncio.Lock()
-        logger.info("[WebCheck] 插件已加载 v2.0.2")
+        logger.info("[WebCheck] 插件已加载 v2.0.3")
 
     # ------------------------------------------------------------------
     # 配置读取
@@ -487,7 +498,7 @@ class WebCheckPlugin(Star):
             value = values[key]
             if type(value) is not int or not low <= value <= high:
                 raise ConfigError(f"配置错误：{key} 必须为 {low}–{high} 的整数")
-        for key in ("use_head", "follow_redirects", "verify_ssl"):
+        for key in ("use_head", "follow_redirects", "verify_ssl", "watchlist_admin_only"):
             if type(values[key]) is not bool:
                 raise ConfigError(f"配置错误：{key} 必须为布尔值")
         if not isinstance(values["watchlist"], list):
@@ -711,7 +722,7 @@ class WebCheckPlugin(Star):
         session_ok = self._session is not None and not self._session.closed
         lines = [
             "🌐 **WebCheck 插件状态**\n",
-            f"版本：2.0.2",
+            f"版本：2.0.3",
             f"超时：{self._cfg('check_timeout')}s",
             f"最大并发：{self._cfg('max_concurrent')}（插件共享）",
             f"未完成 DNS：{len(self._dns_tasks)}/{self._resolver.limit if self._resolver else self._cfg('max_dns_tasks')}",
