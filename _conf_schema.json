@@ -26,6 +26,12 @@
         "default": 5,
         "description": "插件共享的最大检查并发数（1–20）"
     },
+    "max_dns_tasks": {
+        "type": "int",
+        "default": 5,
+        "description": "本插件未完成 DNS 解析数上限（1–20）",
+        "hint": "超时及重载前尚未结束的解析仍计入容量；修改上限需重载插件"
+    },
     "max_pending_targets": {
         "type": "int",
         "default": 200,

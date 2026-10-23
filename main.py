@@ -163,6 +163,45 @@ class UnsafeTargetError(aiohttp.ClientError):
         super().__init__("安全拦截：目标地址不属于允许的公网范围")
 
 
+class DNSBusyError(aiohttp.ClientError):
+    """未完成的底层 DNS 解析已达到容量。"""
+
+
+class BoundedResolver(aiohttp.abc.AbstractResolver):
+    """限制真实未完成解析；调用方取消不会释放仍在运行的解析名额。"""
+
+    def __init__(self, limit: int, resolver: aiohttp.abc.AbstractResolver | None = None,
+                 *, tasks: set[asyncio.Task] | None = None):
+        self.limit = limit
+        self._resolver = resolver if resolver is not None else aiohttp.resolver.ThreadedResolver()
+        self._tasks = tasks if tasks is not None else set()
+        self._closed = False
+
+    @property
+    def active(self) -> int:
+        return len(self._tasks)
+
+    async def resolve(self, host: str, port: int = 0, family=0):
+        if self._closed:
+            raise DNSBusyError("DNS 解析器已关闭")
+        if len(self._tasks) >= self.limit:
+            raise DNSBusyError("DNS 解析繁忙，请稍后重试")
+        task = asyncio.create_task(self._resolver.resolve(host, port, family))
+        self._tasks.add(task)
+
+        def finished(done: asyncio.Task):
+            self._tasks.discard(done)
+            if not done.cancelled():
+                done.exception()  # 失去观察者时消费异常，避免未处理任务警告。
+
+        task.add_done_callback(finished)
+        return await asyncio.shield(task)
+
+    async def close(self):
+        self._closed = True
+        await self._resolver.close()
+
+
 class SafeTCPConnector(aiohttp.TCPConnector):
     async def _resolve_host(self, host, port, traces=None):
         # 在缓存、IP 字面量和 DNS 解析的共同出口检查，原 hostname 不变。
@@ -337,6 +376,10 @@ async def _check_once(
         result.retriable = True
         result.error_kind = "network"
         result.error = f"连接或响应超时（总期限 {timeout:g}s），请检查目标和服务器网络"
+    except DNSBusyError:
+        result.error_kind = "network"
+        result.error = "DNS 解析繁忙，请稍后重试"
+        result.retriable = False
     except aiohttp.ClientConnectionError as exc:
         result.retriable = not isinstance(exc, aiohttp.ClientConnectorDNSError)
         result.error_kind = "network"
@@ -410,6 +453,14 @@ class WebCheckPlugin(Star):
         super().__init__(context)
         self.config: AstrBotConfig = config if config is not None else {}
         self._session: Optional[aiohttp.ClientSession] = None
+        self._resolver: Optional[BoundedResolver] = None
+        # Context survives plugin module reloads: old system lookups must still
+        # count against admission in the new instance until they really finish.
+        self._dns_tasks = getattr(context, "_webcheck_dns_tasks", None)
+        if self._dns_tasks is None:
+            self._dns_tasks = set()
+            if context is not None:
+                context._webcheck_dns_tasks = self._dns_tasks
         self._session_lock = asyncio.Lock()
         self._limiter = None
         self._concurrency_limit = None
@@ -429,6 +480,7 @@ class WebCheckPlugin(Star):
             raise ConfigError("配置错误：插件配置必须是对象")
         values = {key: self.config.get(key, deepcopy(spec["default"])) for key, spec in _conf_schema.items()}
         bounds = {"check_timeout": (1, 120), "max_concurrent": (1, 20),
+                  "max_dns_tasks": (1, 20),
                   "retry_count": (0, 3), "max_sites": (1, 100),
                   "max_pending_targets": (1, 1000), "queue_timeout": (1, 120)}
         for key, (low, high) in bounds.items():
@@ -466,8 +518,13 @@ class WebCheckPlugin(Star):
         async with self._session_lock:
             self._ensure_running()
             if self._session is None or self._session.closed:
+                limit = self._cfg("max_dns_tasks")
+                if self._resolver is not None:
+                    await self._resolver.close()
+                self._resolver = BoundedResolver(limit, tasks=self._dns_tasks)
                 self._session = aiohttp.ClientSession(
-                    connector=SafeTCPConnector(), cookie_jar=aiohttp.DummyCookieJar(),
+                    connector=SafeTCPConnector(resolver=self._resolver),
+                    cookie_jar=aiohttp.DummyCookieJar(),
                 )
             return self._session
 
@@ -485,6 +542,9 @@ class WebCheckPlugin(Star):
                 if self._session is not None:
                     await self._session.close()
                     self._session = None
+                if self._resolver is not None:
+                    await self._resolver.close()
+                    self._resolver = None
             logger.info("[WebCheck] 插件已卸载")
 
     # ------------------------------------------------------------------
@@ -654,6 +714,7 @@ class WebCheckPlugin(Star):
             f"版本：2.0.2",
             f"超时：{self._cfg('check_timeout')}s",
             f"最大并发：{self._cfg('max_concurrent')}（插件共享）",
+            f"未完成 DNS：{len(self._dns_tasks)}/{self._resolver.limit if self._resolver else self._cfg('max_dns_tasks')}",
             f"每次目标上限：{self._cfg('max_sites')}",
             f"在途批次预留目标：{self._pending_targets}/{self._cfg('max_pending_targets')}",
             f"排队等待上限：{self._cfg('queue_timeout')}s",
